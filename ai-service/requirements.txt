@@ -3,7 +3,7 @@ uvicorn[standard]
 langchain==0.2.*
 langchain-openai
 langchain-anthropic
-langgraph==0.1.*
+langgraph==1.2.*
 langsmith
 openai
 anthropic
