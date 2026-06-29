@@ -1,6 +1,6 @@
 fastapi==0.110.0
 uvicorn[standard]
-langchain==0.2.*
+langchain==1.3.*
 langchain-openai
 langchain-anthropic
 langgraph==0.1.*
