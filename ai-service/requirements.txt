@@ -1,0 +1,17 @@
+fastapi==0.110.0
+uvicorn[standard]
+langchain==0.2.*
+langchain-openai
+langchain-anthropic
+langgraph==0.1.*
+langsmith
+openai
+anthropic
+pydantic==2.*
+sqlalchemy==2.*
+psycopg2-binary
+python-dotenv
+httpx
+pyjwt
+# PDF report generator
+reportlab>=5.0.0

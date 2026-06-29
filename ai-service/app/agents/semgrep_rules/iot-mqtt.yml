@@ -1,0 +1,300 @@
+# Semgrep custom rules for IoT MQTT/TLS security.
+# This file is enabled by scan_directives.py for detected_domain='iot'.
+
+rules:
+
+  # =========================================================================
+  # MQTT broker security
+  # =========================================================================
+
+  - id: iot-mqtt-cleartext
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      MQTT broker connection over cleartext (mqtt://). All
+      device-to-broker communication must use TLS (mqtts://).
+      OWASP IoT Top 10 I3: Insecure Network Services.
+    metadata:
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+      owasp-iot: "I3 Insecure Network Services"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $CLIENT.connect("mqtt://.../*", ...)
+          - pattern: |
+              mqtt.Client().connect("mqtt://.../*")
+          - pattern: |
+              paho.mqtt.client.Client().connect("mqtt://.../*")
+
+  - id: iot-mqtt-default-credentials
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Default MQTT credentials detected. Default credentials are the
+      #1 IoT attack vector. Always require unique device credentials
+      and rotate them on provisioning.
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      owasp-iot: "I1 Weak/Hard-coded Passwords"
+    pattern-regex: '"(admin|root|user|device|test):(admin|root|user|device|test|1234|12345|password)"'
+
+  - id: iot-mqtt-no-tls-verify
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      TLS connection with certificate verification disabled. NEVER
+      set tls_insecure_set(True) or rejectUnauthorized=false. This
+      enables MITM attacks.
+    metadata:
+      cwe: "CWE-295: Improper Certificate Validation"
+      owasp-iot: "I2 Insecure Network Services"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              mqtt.Client().tls_set(..., cert_reqs=ssl.CERT_NONE, ...)
+          - pattern: |
+              $CLIENT.tls_insecure_set(True)
+
+  - id: iot-firmware-path-traversal
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Firmware path traversal: user-controlled file path used to
+      read firmware. Validate against an allowlist of firmware
+      version IDs.
+    metadata:
+      cwe: "CWE-22: Path Traversal"
+      owasp-iot: "I3 Insecure Network Services"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $FW = open($REQ.query.firmware, "rb")
+          - pattern: |
+              fs.readFileSync($REQ.body.firmware_path)
+          - pattern: |
+              send_file($REQ.args.get("firmware"))
+
+  - id: iot-telemetry-no-encryption
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Telemetry data sent in cleartext. Sensor data (temperature,
+      GPS, biometric) may reveal user behavior or location. Encrypt
+      with AES-256-GCM or use TLS.
+    metadata:
+      cwe: "CWE-311: Missing Encryption of Sensitive Data"
+      owasp-iot: "I3 Insecure Network Services"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $MQTT.publish("device/telemetry", $DATA)
+          - pattern: |
+              $MQTT.publish("sensor/data", $DATA)
+
+  - id: iot-device-auth-bypass
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Device authentication bypass: device ID is the only auth
+      credential. Implement mutual TLS, signed firmware, or device
+      certificates.
+    metadata:
+      cwe: "CWE-287: Improper Authentication"
+      owasp-iot: "I1 Weak/Hard-coded Passwords"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $MQTT.publish($REQ.query.device_id + "/command", $CMD)
+          - pattern: |
+              if ($REQ.headers['x-device-id'] == $KNOWN_DEVICE):
+
+  - id: iot-default-mqtt-port-public
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      MQTT broker exposed on default port (1883) or public IP. Use
+      non-default port (8883 for TLS) and bind to private network.
+    metadata:
+      cwe: "CWE-668: Exposure of Resource to Wrong Sphere"
+      owasp-iot: "I3 Insecure Network Services"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $BROKER = "0.0.0.0"
+          - pattern: |
+              $BROKER = "tcp://0.0.0.0:1883"
+
+  - id: iot-update-over-plaintext
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Firmware/software update downloaded over HTTP. Firmware updates
+      MUST be downloaded over HTTPS and verified with a signature.
+    metadata:
+      cwe: "CWE-494: Download of Code Without Integrity Check"
+      owasp-iot: "I3 Insecure Network Services"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $URL = "http://.../firmware/.../*"
+          - pattern: |
+              requests.get("http://.../update.bin")
+
+  # =========================================================================
+  # TLS / certificate pinning
+  # =========================================================================
+
+  - id: iot-tls-cert-verify-disabled
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      TLS certificate verification disabled (`rejectUnauthorized: false`,
+      `verify=False`, `tls_insecure_set(true)`, atau
+      `cert_reqs=ssl.CERT_NONE`). MITM attack trivial. OWASP IoT I3.
+    metadata:
+      cwe: "CWE-295: Improper Certificate Validation"
+      owasp-iot: "I3 Insecure Network Services"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              { rejectUnauthorized: false }
+          - pattern: |
+              {rejectUnauthorized:false}
+          - pattern: |
+              verify=False
+          - pattern: |
+              tls_insecure_set(true)
+          - pattern: |
+              cert_reqs=ssl.CERT_NONE
+
+  - id: iot-mqtt-broker-bind-wildcard
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      MQTT broker di-bind ke `0.0.0.0` atau wildcard interface.
+      Device harus bind ke interface spesifik (mis. 192.168.1.1)
+      di belakang firewall. Bind 0.0.0.0 → semua network reachable.
+      OWASP IoT I3.
+    metadata:
+      cwe: "CWE-668: Exposure of Resource to Wrong Sphere"
+      owasp-iot: "I3 Insecure Network Services"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $BROKER = "0.0.0.0"
+          - pattern: |
+              $BROKER = "tcp://0.0.0.0:1883"
+          - pattern: |
+              bind_address = "0.0.0.0"
+
+  - id: iot-firmware-no-signature-verify
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Firmware update endpoint tidak verify signature (RSA, ECDSA,
+      atau ed25519) sebelum flashing. Attacker bisa MITM update
+      lalu flash malicious firmware ke device. OWASP IoT I9.
+    metadata:
+      cwe: "CWE-494: Download of Code Without Integrity Check"
+      owasp-iot: "I9 Insecure Default Settings"
+      ai-devsecops-source: iot-mqtt.yml
+    pattern-regex: '(?:update_firmware|ota_update|flash_firmware|installUpdate)\s*\('
+
+  - id: iot-default-password-in-config
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Default MQTT / device password hardcoded di config file. Pakai
+      per-device unique credentials atau X.509 client certificates.
+      OWASP IoT I1.
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      owasp-iot: "I1 Weak, Hard-coded, or Guessable Passwords"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              password: "admin"
+          - pattern: |
+              password: "password"
+          - pattern: |
+              password: "1234"
+          - pattern: |
+              password: "mqtt"
+          - pattern: |
+              MQTT_PASSWORD = "admin"
+
+  - id: iot-sensor-data-no-encryption
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Sensor / telemetry data dikirim ke cloud tanpa encryption
+      (HTTP POST, plaintext MQTT). Sensor data bisa dipakai untuk
+      fingerprinting / surveillance. Pakai HTTPS / TLS MQTT.
+      OWASP IoT I3.
+    metadata:
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+      owasp-iot: "I3 Insecure Network Services"
+      ai-devsecops-source: iot-mqtt.yml
+    pattern-regex: '(?:fetch|axios|requests)\.\s*(?:post|put)\s*\(\s*["'']http://'
+
+  - id: iot-telnet-enabled
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Telnet (port 23) atau unsecured serial console dipakai untuk
+      device management. Pakai SSH (port 22) dengan key-based auth.
+      OWASP IoT I3.
+    metadata:
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+      owasp-iot: "I3 Insecure Network Services"
+      ai-devsecops-source: iot-mqtt.yml
+    pattern-regex: 'telnet\.open\s*\(|telnetlib\.Telnet\s*\('
+
+  - id: iot-debug-interface-exposed
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Debug interface (JTAG, SWD, UART, atau REPL server) di-expose
+      di production firmware. Disable sebelum ship. OWASP IoT I9.
+    metadata:
+      cwe: "CWE-489: Active Debug Code"
+      owasp-iot: "I9 Insecure Default Settings"
+      ai-devsecops-source: iot-mqtt.yml
+    pattern-regex: '(?:jtag_open|swd_open|openocd|pyocd|REPL\.server|debug_uart)'
+
+  - id: iot-device-id-as-only-auth
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Device authentication hanya pakai device_id (MAC address / serial
+      number) tanpa cryptographic credential. Attacker bisa spoof
+      device_id. Pakai mTLS / X.509 / JWT. OWASP IoT I1.
+    metadata:
+      cwe: "CWE-287: Improper Authentication"
+      owasp-iot: "I1 Weak, Hard-coded, or Guessable Passwords"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if ($REQ.headers["x-device-id"]):
+          - pattern: |
+              if ($REQ.headers["device-id"]):
+          - pattern: |
+              if ($DEVICE_ID == $REQ.headers["device-id"]):
+      - pattern-not: |
+          if verify_signature($REQ, $DEVICE_KEY):
+
+  - id: iot-overall-tls-required
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Insecure protocol (HTTP, FTP, Telnet) dipakai untuk IoT
+      communication. Pakai HTTPS, SFTP, atau SSH. OWASP IoT I3.
+    metadata:
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+      owasp-iot: "I3 Insecure Network Services"
+      ai-devsecops-source: iot-mqtt.yml
+    pattern-regex: '\b(?:ftp|telnet)\.(?:get|put|connect|open)\s*\('

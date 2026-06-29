@@ -1,0 +1,314 @@
+# REMEDIATED WORKFLOW (POST-FIX)
+# Original failures resolved —
+#   [FIXED] k8s-scan: added directory existence check + fallback
+#   [FIXED] kube-bench: replaced kubectl with direct Docker container
+#   [FIXED] terraform-scan: added directory check + terraform init -backend=false
+#   [FIXED] container-build: replaced hardcoded path with find-based discovery
+#   [FIXED] sast/build: no longer cascading skip (decoupled needs)
+#
+# Changes compared to original:
+#   + Precondition validation on all deployment jobs
+#   + Graceful skip when deployment files absent (exit 0)
+#   + kube-bench uses aquasec/kube-bench container, not kubectl
+#   + container-build dynamically discovers Dockerfiles
+#   + Terraform init uses -backend=false (CI-safe)
+#   + Decoupled sast/build from detect-services failure chain
+
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  detect-services:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Detect services
+        id: detect
+        run: |
+          echo '{"services":["backend","frontend","ai-service"]}' > services.json
+          cat services.json
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint
+        run: |
+          cd backend && go vet ./...
+          cd ../frontend && npm run lint
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests
+        run: |
+          cd backend && go test ./...
+          cd ../frontend && npm test -- --coverage
+
+  sast:
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        service: [backend, frontend, ai-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: semgrep/semgrep-action@v1
+        with:
+          config: p/default
+    continue-on-error: false
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        service: [backend, frontend, ai-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gitleaks/gitleaks-action@v2
+    continue-on-error: false
+
+  cve-scan:
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      matrix:
+        service:
+          - { name: backend, tool: go, pkg: gomod }
+          - { name: frontend, tool: npm, pkg: npm }
+          - { name: ai-service, tool: python, pkg: pip }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run CVE scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: '${{ matrix.service.name }}/'
+          format: sarif
+          output: 'trivy-${{ matrix.service.name }}.sarif'
+          severity: HIGH,CRITICAL
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          cd backend && go build ./...
+          cd ../frontend && npm run build
+
+  # ============================================================
+  # DEPLOYMENT JOBS — ALL WITH DEFENSIVE PRECONDITION CHECKS
+  # ============================================================
+
+  container-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: false
+    needs: [lint]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Find Dockerfiles
+        id: find-df
+        run: |
+          echo "dockerfiles<<EOF" >> $GITHUB_OUTPUT
+          find . -name "Dockerfile*" -not -path "*/node_modules/*" -not -path "*/.venv/*" | tee -a $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Set up Docker Buildx
+        if: steps.find-df.outputs.dockerfiles != ''
+        uses: docker/setup-buildx-action@v3
+      - name: Build service images
+        if: steps.find-df.outputs.dockerfiles != ''
+        run: |
+          echo "Found Dockerfiles:"
+          echo "${{ steps.find-df.outputs.dockerfiles }}"
+          echo "${{ steps.find-df.outputs.dockerfiles }}" | while IFS= read -r df; do
+            [ -z "$df" ] && continue
+            dir=$(dirname "$df")
+            tag=$(basename "$dir"):ci
+            echo "Building $tag from $df ..."
+            docker build -f "$df" -t "$tag" "$dir"
+          done
+      - name: No Dockerfiles found
+        if: steps.find-df.outputs.dockerfiles == ''
+        run: |
+          echo "::notice::No Dockerfiles found in repository, skipping container build."
+
+  container-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: false
+    needs: [container-build]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Find Dockerfiles
+        id: find-df
+        run: |
+          echo "dockerfiles<<EOF" >> $GITHUB_OUTPUT
+          find . -name "Dockerfile*" -not -path "*/node_modules/*" -not -path "*/.venv/*" | tee -a $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Run Trivy image scan
+        if: steps.find-df.outputs.dockerfiles != ''
+        run: |
+          echo "${{ steps.find-df.outputs.dockerfiles }}" | while IFS= read -r df; do
+            [ -z "$df" ] && continue
+            dir=$(dirname "$df")
+            tag=$(basename "$dir"):ci
+            echo "Scanning $tag ..."
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:latest image --severity HIGH,CRITICAL --format sarif \
+              --output "trivy-$(basename "$dir").sarif" "$tag"
+          done
+      - name: Upload Trivy container results
+        if: success() || failure()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-*.sarif'
+
+  k8s-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: false
+    needs: [lint]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Validate K8s manifests exist
+        id: k8s-check
+        run: |
+          if ls k8s/*.yaml k8s/*.yml 2>/dev/null; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "Kubernetes manifests found in k8s/"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "::notice::No Kubernetes manifests found in k8s/, skipping K8s scan."
+          fi
+      - name: Run Trivy Kubernetes scan
+        if: steps.k8s-check.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: k8s/
+          format: sarif
+          output: trivy-k8s-results.sarif
+      - name: Run Kubescape scan
+        if: steps.k8s-check.outputs.found == 'true'
+        uses: kubescape/github-action@v1
+        with:
+          path: k8s/
+          framework: nsa
+          outputFile: kubescape-results.sarif
+          format: sarif
+      - name: Upload K8s security results
+        if: steps.k8s-check.outputs.found == 'true' && (success() || failure())
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-k8s-results.sarif
+
+  kube-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: false
+    needs: [lint]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Validate K8s manifests exist
+        id: k8s-check
+        run: |
+          if ls k8s/*.yaml k8s/*.yml 2>/dev/null; then
+            echo "found=true" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "::notice::No Kubernetes manifests found in k8s/, skipping kube-bench."
+          fi
+      - name: Run kube-bench (containerized)
+        if: steps.k8s-check.outputs.found == 'true'
+        run: |
+          docker run --rm -v "$PWD/k8s:/opt/kube-bench/cfg:ro" \
+            aquasec/kube-bench:latest run \
+            --targets node \
+            --config-dir /opt/kube-bench/cfg \
+            --json | tee kube-bench-results.json
+      - name: Run Checkov on Kubernetes
+        if: steps.k8s-check.outputs.found == 'true'
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: k8s
+          framework: kubernetes
+          output_format: sarif
+          output: checkov-k8s-results.sarif
+      - name: Upload K8s benchmark results
+        if: steps.k8s-check.outputs.found == 'true' && (success() || failure())
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-k8s-results.sarif
+
+  terraform-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: false
+    needs: [lint]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Validate Terraform files exist
+        id: tf-check
+        run: |
+          if ls terraform/*.tf 2>/dev/null; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "Terraform files found in terraform/"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "::notice::No Terraform files found in terraform/, skipping IaC scan."
+          fi
+      - name: Setup Terraform
+        if: steps.tf-check.outputs.found == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0
+      - name: Terraform Init (CI-safe, no backend)
+        if: steps.tf-check.outputs.found == 'true'
+        run: terraform init -backend=false
+        working-directory: terraform/
+      - name: Terraform Validate
+        if: steps.tf-check.outputs.found == 'true'
+        run: terraform validate
+        working-directory: terraform/
+      - name: Run Trivy IaC scan
+        if: steps.tf-check.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: terraform/
+          format: sarif
+          output: trivy-tf-results.sarif
+      - name: Run Checkov on Terraform
+        if: steps.tf-check.outputs.found == 'true'
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform
+          framework: terraform
+          output_format: sarif
+          output: checkov-tf-results.sarif
+      - name: Upload IaC security results
+        if: steps.tf-check.outputs.found == 'true' && (success() || failure())
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-tf-results.sarif

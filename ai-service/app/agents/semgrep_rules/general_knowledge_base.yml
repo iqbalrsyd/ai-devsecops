@@ -1,0 +1,79 @@
+# General (cross-domain) Knowledge Base for K2.3 pattern_inference.
+# Companion to domain_knowledge_base.yml.
+# Rule yang listed di sini applicable ke SEMUA domain.
+#
+# Convention:
+#   - CWE format: "CWE-XXX: Title"
+#   - Rule id prefix (K2.3): ai-{coverage_id}-{slug}
+#   - Severity: dari LLM bebas (WARNING/ERROR/INFO), di-normalize ke CVSS downstream
+#   - Companion: domain_knowledge_base.yml (per-domain detail)
+#
+# v9.4 (sinkron naskah baru) — per rekomendasi-judul.md:
+#   - applicable_to sekarang hanya 3 domain (R2.2 — pengerucutan 7→3)
+#   - Pendekatan hybrid: OWASP (makro) + CWE (mikro) sesuai naskah R4.2
+#   - 15 coverages library di-handle di naskah T4 (OWASP makro) dan T5
+#     (justifikasi CWE mikro untuk Semgrep ruleset)
+#
+# Reference:
+#   - app/agents/nodes/pattern_inference_node.py (K2.3 consumer)
+#   - app/agents/semgrep_rules/owasp-api.yml (Tier 1 source of truth)
+#   - naskah/rekomendasi-judul.md (R4.2 — Justifikasi 15 Security Coverages)
+
+version: "general-1.0"
+purpose: "Cross-domain knowledge base injected ke K2.3 pattern_inference prompt. Berisi CWE + threat + rule outline yang applicable ke SEMUA webapp domain dalam scope 3-domain (e-commerce, blog, iot)."
+usage: |
+  Loaded by pattern_inference_node._load_knowledge_base("general_knowledge_base.yml").
+  Combined dengan domain_knowledge_base.yml (filtered by detected_domain) untuk
+  membentuk complete KB context. LLM tetap pakai repo source_sample + routes_sample
+  sebagai primary context — KB ini cuma inspiration pool.
+
+# Scope sesuai naskah R2.2: 3 domain aktif
+applicable_to: ["e-commerce", "blog", "iot"]
+
+# 15 coverages library (lihat naskah T4 + T5) — bagian applicable_to_general:
+#   - api_security, authentication_security, data_security applicable ke 3 domain
+#   - payment_security applicable hanya ke e-commerce (lihat domain_knowledge_base.yml)
+#   - cms_security applicable hanya ke blog
+#   - iot_security applicable hanya ke iot
+applicable_coverages:
+  - api_security
+  - authentication_security
+  - data_security
+
+# CWE focus — hybrid OWASP (makro) + CWE (mikro) sesuai naskah R4.2
+# Setiap CWE dipetakan ke OWASP category di metadata Semgrep
+#
+# v9.5: alignment dengan domain_knowledge_base.yml. CWE yang overlap
+# (639, 770, 918, 209, 307) sudah di-handle di domain_knowledge_base,
+# di sini tetap dipertahankan untuk coverage rule general-purpose.
+cwe_focus:
+  - "CWE-639: BOLA / IDOR"
+  - "CWE-915: Mass assignment"
+  - "CWE-213: Excessive data exposure"
+  - "CWE-770: Resource consumption (no pagination / no body limit)"
+  - "CWE-285: Function-level auth missing"
+  - "CWE-918: SSRF"
+  - "CWE-942: CORS misconfig (wildcard / origin reflection)"
+  - "CWE-209: Stack trace exposure"
+  - "CWE-916: Weak bcrypt rounds"
+  - "CWE-307: No rate limit on login"
+  - "CWE-862: Missing Authorization"
+  - "CWE-345: Insufficient Verification of Data Authenticity"
+
+threats:
+  - "Generic API vulnerabilities applicable ke 3 domain aktif (BOLA, mass assignment, SSRF, CORS misconfig, weak auth)"
+
+rule_outlines:
+  - id_skeleton: "ai-api-...-bola-no-ownership"
+    hint: "endpoint /:id tanpa ownership check atau middleware auth"
+  - id_skeleton: "ai-authentication-...-bcrypt-low-rounds"
+    hint: "bcrypt.hash(pw, < 10) untuk password storage"
+  - id_skeleton: "ai-api-...-mass-assign-spread"
+    hint: "Model.create({...req.body}) atau User.update(req.body) tanpa whitelist"
+  - id_skeleton: "ai-api-...-ssrf-user-url"
+    hint: "fetch(req.query.url) atau axios(req.body.url) tanpa validateUrl"
+  - id_skeleton: "ai-api-...-cors-wildcard"
+    hint: "res.setHeader('Access-Control-Allow-Origin', '*')"
+
+frameworks: []
+skip_for: ["healthcare", "fintech", "education"]

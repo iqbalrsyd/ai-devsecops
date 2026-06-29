@@ -1,0 +1,51 @@
+name: PR Security Pipeline
+on: [pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint Go
+        run: cd backend && go vet ./...
+      - name: Lint React
+        run: cd frontend && npm run lint
+      - name: Lint Python
+        run: cd ai-service && pip install ruff && ruff check .
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Go Tests
+        run: cd backend && go test ./... -coverprofile=coverage.out
+      - name: React Tests
+        run: cd frontend && npm test -- --coverage
+
+  semgrep:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: semgrep/semgrep-action@v1
+        with:
+          config: p/default
+
+  gitleaks:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gitleaks/gitleaks-action@v2
+
+  trivy:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          format: json
+          output: trivy-report.json
+          severity: CRITICAL,HIGH

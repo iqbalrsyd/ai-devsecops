@@ -1,0 +1,563 @@
+# Semgrep custom rules untuk OWASP API Security Top 10 2023.
+# Generic, applicable ke semua web API (tidak spesifik e-commerce).
+# Aktif ketika pipeline AI mendeteksi backend dengan routes/handler
+# (lihat app/agents/nodes/domain_detection_node.py).
+
+rules:
+
+  # =========================================================================
+  # API1:2023 - Broken Object Level Authorization (BOLA / IDOR)
+  # =========================================================================
+
+  - id: api-bola-missing-ownership-check
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Endpoint menerima object ID (e.g. :id, :orderId, :userId) dari
+      URL tapi tidak verify ownership. Attacker bisa akses resource
+      user lain dengan iterasi ID. OWASP API1:2023.
+    metadata:
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp-api: "API1:2023 Broken Object Level Authorization"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $APP.$METHOD("/$P/:id", $H)
+          - pattern: |
+              router.$METHOD("/$P/:id", $H)
+          - pattern: |
+              $APP.$METHOD("/$P/:userId", $H)
+          - pattern: |
+              $APP.$METHOD("/$P/:orderId", $H)
+
+  # =========================================================================
+  # API2:2023 - Broken Authentication
+  # =========================================================================
+
+  - id: api-auth-bcrypt-missing-rounds
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      bcrypt dengan rounds < 10 tidak cukup. Pakai rounds >= 12 untuk
+      production (OWASP recommendation). OWASP API2:2023.
+    metadata:
+      cwe: "CWE-916: Use of Password Hash With Insufficient Computational Effort"
+      owasp-api: "API2:2023 Broken Authentication"
+    pattern-regex: 'bcrypt\.(?:hash|hashSync)\s*\(\s*[^,]+,\s*([0-9]+|saltRounds\s*:\s*([0-9]+))\s*\)'
+
+  - id: api-auth-no-rate-limit-on-login
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Endpoint /login atau /auth/login tidak pakai rate limiting.
+      Attacker bisa brute-force password. Pakai express-rate-limit
+      atau library serupa. OWASP API2:2023 + API4:2023.
+    metadata:
+      cwe: "CWE-307: Improper Restriction of Excessive Authentication Attempts"
+      owasp-api: "API2:2023 Broken Authentication"
+      owasp-api-2: "API4:2023 Unrestricted Resource Consumption"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $APP.post("/login", $H)
+          - pattern: |
+              $APP.post("/auth/login", $H)
+          - pattern: |
+              $APP.post("/api/login", $H)
+      - pattern-not: |
+          $APP.post("/login", rateLimit, $H)
+      - pattern-not: |
+          $APP.post("/auth/login", rateLimit, $H)
+
+  # =========================================================================
+  # API3:2023 - Broken Object Property Level Authorization
+  # =========================================================================
+
+  - id: api-mass-assignment-spread-body
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Spread `req.body` ke object user/model. Attacker bisa tambah
+      field privilege (is_admin, role) dan escalate. Whitelist
+      allowed fields. OWASP API3:2023.
+    metadata:
+      cwe: "CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes"
+      owasp-api: "API3:2023 Broken Object Property Level Authorization"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $MODEL.create({...$REQ.body})
+          - pattern: |
+              $MODEL.update({...$REQ.body})
+
+  - id: api-excessive-data-exposure
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Response kirim semua field model ke client. Field sensitif
+      (password hash, internal flag, PII) bisa terekspos.
+      Whitelist field yang dikembalikan. OWASP API3:2023.
+    metadata:
+      cwe: "CWE-213: Exposure of Sensitive Information Due to Incompatible Policies"
+      owasp-api: "API3:2023 Broken Object Property Level Authorization"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              res.json($USER)
+          - pattern: |
+              res.json($MODEL.toJSON())
+          - pattern: |
+              res.json({user: $USER})
+
+  # =========================================================================
+  # API4:2023 - Unrestricted Resource Consumption
+  # =========================================================================
+
+  - id: api-no-pagination
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Endpoint return list tanpa pagination. Attacker bisa fetch
+      semua data sekaligus (DoS / data exfiltration). Pakai
+      limit/offset atau cursor. OWASP API4:2023.
+    metadata:
+      cwe: "CWE-770: Allocation of Resources Without Limits or Throttling"
+      owasp-api: "API4:2023 Unrestricted Resource Consumption"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $MODEL.find()
+          - pattern: |
+              $MODEL.findAll()
+          - pattern: |
+              db.query("SELECT * FROM $T")
+          - pattern: |
+              res.json($MODEL.all())
+
+  - id: api-no-max-body-size
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Tidak ada limit body size. Attacker bisa kirim payload
+      besar (DoS). Set `express.json({ limit: '100kb' })` atau
+      body-parser limit. OWASP API4:2023.
+    metadata:
+      cwe: "CWE-770: Allocation of Resources Without Limits or Throttling"
+      owasp-api: "API4:2023 Unrestricted Resource Consumption"
+    patterns:
+      - pattern: |
+          $APP.use(express.json())
+      - pattern-not: |
+          $APP.use(express.json({limit: $L}))
+      - pattern-not: |
+          $APP.use(express.json({limit:$L}))
+
+  # =========================================================================
+  # API5:2023 - Broken Function Level Authorization
+  # =========================================================================
+
+  - id: api-admin-endpoint-no-role-check
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Endpoint /admin atau /api/admin tidak cek role. Attacker
+      user biasa bisa akses. Pakai middleware `requireRole('admin')`
+      atau equivalent. OWASP API5:2023.
+    metadata:
+      cwe: "CWE-285: Improper Authorization"
+      owasp-api: "API5:2023 Broken Function Level Authorization"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $APP.get("/admin", $H)
+          - pattern: |
+              $APP.post("/admin", $H)
+          - pattern: |
+              $APP.$METHOD("/api/admin", $H)
+      - pattern-not: |
+          $APP.$METHOD("/admin", requireAdmin, $H)
+
+  # =========================================================================
+  # API7:2023 - Server Side Request Forgery (SSRF)
+  # =========================================================================
+
+  - id: api-ssrf-user-controlled-url
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      URL dari user input dipakai di fetch/request tanpa validasi
+      whitelist. Attacker bisa request internal services (SSRF).
+      OWASP API7:2023.
+    metadata:
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp-api: "API7:2023 Server Side Request Forgery"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              fetch($REQ.query.url)
+          - pattern: |
+              fetch($REQ.body.url)
+          - pattern: |
+              requests.get($REQ.json.url)
+          - pattern: |
+              axios.get($REQ.query.url)
+          - pattern: |
+              requests.get($REQ.args.get("url"))
+
+  # =========================================================================
+  # API8:2023 - Security Misconfiguration
+  # =========================================================================
+
+  - id: api-cors-wildcard-origin
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      CORS pakai wildcard `*` origin. Browser akan izinkan request
+      dari domain manapun. Set explicit allowed origins.
+      OWASP API8:2023.
+    metadata:
+      cwe: "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+      owasp-api: "API8:2023 Security Misconfiguration"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              Access-Control-Allow-Origin: *
+          - pattern: |
+              res.setHeader("Access-Control-Allow-Origin", "*")
+          - pattern: |
+              origin: "*"
+
+  - id: api-cors-reflect-origin
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      CORS reflect arbitrary Origin header. Attacker bisa paksa
+      browser kirim cookie cross-origin. Set explicit allowlist
+      origin. OWASP API8:2023.
+    metadata:
+      cwe: "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+      owasp-api: "API8:2023 Security Misconfiguration"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              res.setHeader("Access-Control-Allow-Origin", $REQ.headers.origin)
+          - pattern: |
+              Access-Control-Allow-Origin: $REQ.headers.origin
+          - pattern: |
+              cors({ origin: $REQ.headers.origin })
+
+  - id: api-stack-trace-exposure
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Error response include stack trace atau detail internal.
+      Attacker bisa enumerasi internal structure. Log full error
+      server-side, return generic message ke client.
+      OWASP API8:2023.
+    metadata:
+      cwe: "CWE-209: Generation of Error Message Containing Sensitive Information"
+      owasp-api: "API8:2023 Security Misconfiguration"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              res.json({ error: $ERR.stack })
+          - pattern: |
+              res.json({ error: $ERR.message, stack: $ERR.stack })
+          - pattern: |
+              res.status(500).send($ERR.stack)
+          - pattern: |
+              traceback.format_exc()
+
+  # =========================================================================
+  # API3:2023 / API4:2023 - Unrestricted Resource Consumption
+  # =========================================================================
+
+  - id: api-no-content-length-limit
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Upload endpoint tanpa `Content-Length` atau `busboy` `limits` option.
+      Attacker bisa kirim payload sangat besar untuk DoS. Set explicit
+      limit (busboy({ limits: { fileSize: ... }}) atau multer limits).
+      OWASP API4:2023.
+    metadata:
+      cwe: "CWE-770: Allocation of Resources Without Limits or Throttling"
+      owasp-api: "API4:2023 Unrestricted Resource Consumption"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              upload.single(...)
+          - pattern: |
+              upload.array(...)
+          - pattern: |
+              busboy(...)
+      - pattern-not: |
+          upload.single($FIELD, { limits: ... })
+      - pattern-not: |
+          upload.array($N, { limits: ... })
+      - pattern-not: |
+          busboy({ limits: ... })
+
+  - id: api-find-all-without-limit
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      ORM call `find()`, `findAll()`, `all()`, `objects.all()` tanpa
+      `.limit()`/`.slice()` akan me-return seluruh tabel. Pakai pagination
+      (limit/offset atau cursor) untuk endpoint list. OWASP API4:2023.
+    metadata:
+      cwe: "CWE-770: Allocation of Resources Without Limits or Throttling"
+      owasp-api: "API4:2023 Unrestricted Resource Consumption"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $MODEL.find({...})
+          - pattern: |
+              $MODEL.findAll({...})
+          - pattern: |
+              $MODEL.objects.all()
+          - pattern: |
+              $DB.query("SELECT * FROM $TBL")
+      - pattern-not: |
+          $MODEL.find({...}).limit($L)
+      - pattern-not: |
+          $MODEL.findAll({...}).limit($L)
+      - pattern-not: |
+          $MODEL.findAll({..., limit: $L, ...})
+      - pattern-not: |
+          $MODEL.findAll({..., take: $L, ...})
+
+  - id: api-no-timeout-on-external-call
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      External HTTP call (fetch, axios, requests) tanpa timeout eksplisit.
+      Jika upstream hang, worker thread/process juga hang dan DoS.
+      Set `timeout: 5000` (axios) atau `AbortController` (fetch).
+      OWASP API4:2023.
+    metadata:
+      cwe: "CWE-400: Uncontrolled Resource Consumption"
+      owasp-api: "API4:2023 Unrestricted Resource Consumption"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              axios.get($URL, $OPTS)
+          - pattern: |
+              axios.post($URL, $DATA, $OPTS)
+          - pattern: |
+              requests.get($URL)
+          - pattern: |
+              requests.post($URL, $DATA)
+          - pattern: |
+              fetch($URL)
+      - pattern-not: |
+          axios.get($URL, { timeout: ... })
+      - pattern-not: |
+          axios.get($URL, {timeout: ...})
+      - pattern-not: |
+          requests.get($URL, timeout=...)
+      - pattern-not: |
+          fetch($URL, { signal: ... })
+
+  # =========================================================================
+  # API2:2023 - Broken Authentication (additional)
+  # =========================================================================
+
+  - id: api-jwt-algorithm-none
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      JWT dengan `algorithm: 'none'` atau tanpa `algorithms` list.
+      Attacker bisa forge token. Selalu specify allowed algorithms
+      (`HS256`, `RS256`, etc). OWASP API2:2023.
+    metadata:
+      cwe: "CWE-347: Improper Verification of Cryptographic Signature"
+      owasp-api: "API2:2023 Broken Authentication"
+    pattern-regex: 'jwt\.(?:verify|decode)\s*\([^)]*(?:algorithm\s*[:=]\s*["'']none["''])|verify\s*\(\s*[^,]+,\s*[^,]+,\s*\{\s*algorithms?\s*:\s*\[\s*["'']none["'']'
+
+  - id: api-password-plaintext-compare
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Perbandingan password / token dengan `==` atau `===` rentan timing
+      attack. Pakai `crypto.timingSafeEqual` (Node) atau `hmac.compare_digest`
+      (Python). OWASP API2:2023.
+    metadata:
+      cwe: "CWE-208: Observable Timing Discrepancy"
+      owasp-api: "API2:2023 Broken Authentication"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if ($PWD == $STORED) { ... }
+          - pattern: |
+              if ($PWD === $STORED) { ... }
+          - pattern: |
+              if $PWD == $STORED:
+          - pattern: |
+              if $PWD == $STORED:
+
+  - id: api-no-https-redirect
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Login / register / reset-password endpoint tanpa schema check
+      (https). Pakai helmet's `hsts()`, Flask-Talisman, atau manual
+      redirect ke https sebelum serving credentials. OWASP API2:2023.
+    metadata:
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+      owasp-api: "API2:2023 Broken Authentication"
+    pattern-regex: '(?:app\.(post|put)\s*\(\s*["''][\''/]?(login|register|reset-password|forgot-password)|url_for\s*\(\s*["'']login|path\s*=\s*["'']/login)'
+
+  # =========================================================================
+  # API1:2023 - BOLA (additional)
+  # =========================================================================
+
+  - id: api-integer-id-trust
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Endpoint menggunakan integer ID (`:id`) untuk akses resource
+      tanpa signed token atau UUID. Attacker bisa enumerasi seluruh
+      resource dengan sequential scanning. OWASP API1:2023.
+    metadata:
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp-api: "API1:2023 Broken Object Level Authorization"
+    pattern-regex: '\.get\s*\(\s*["''][^"'']*/:id["'']'
+
+  - id: api-pagination-no-total
+    languages: [javascript, typescript, python]
+    severity: INFO
+    message: >-
+      List endpoint harus return total count (`X-Total-Count` header
+      atau `meta.total`) supaya client bisa render pagination. Tanpa
+      itu, infinite-scroll / next-page flow rusak. OWASP API3:2023.
+    metadata:
+      cwe: "CWE-1295: Debug Messages Revealing Unnecessary Information"
+      owasp-api: "API3:2023 Broken Object Property Level Authorization"
+    pattern-regex: 'res\.json\s*\(\s*(\w+)\s*\)'
+
+  # =========================================================================
+  # API3:2023 - Broken Object Property Level Authorization (BOPLA)
+  # =========================================================================
+
+  - id: api-allow-method-on-objects
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Spread user input langsung ke object yang akan disimpan:
+      `{...req.body}` atau `Object.assign(target, req.body)`. Attacker
+      bisa set field privilege (is_admin, role, balance) via mass
+      assignment. Whitelist allowed fields. OWASP API3:2023.
+    metadata:
+      cwe: "CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes"
+      owasp-api: "API3:2023 Broken Object Property Level Authorization"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              const $X = { ...$REQ.body }
+          - pattern: |
+              let $X = { ...$REQ.body }
+          - pattern: |
+              $X = { ...$REQ.body }
+          - pattern: |
+              Object.assign($TARGET, $REQ.body)
+          - pattern: |
+              Object.assign({}, $REQ.body)
+          - pattern: |
+              _extends({}, $REQ.body)
+
+  - id: api-send-user-object
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Response kirim seluruh user/model object ke client tanpa
+      whitelist. Field sensitif (password_hash, internal flags, PII)
+      bisa terekspos. Gunakan explicit DTO / pick fields. OWASP API3:2023.
+    metadata:
+      cwe: "CWE-213: Exposure of Sensitive Information Due to Incompatible Policies"
+      owasp-api: "API3:2023 Broken Object Property Level Authorization"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              res.json($USER)
+          - pattern: |
+              res.json({ user: $USER })
+          - pattern: |
+              res.json({...$USER})
+          - pattern: |
+              return $USER
+          - pattern: |
+              return User(**$DATA)
+          - pattern: |
+              return $MODEL.to_dict()
+
+  # =========================================================================
+  # API5:2023 - Broken Function Level Authorization
+  # =========================================================================
+
+  - id: api-delete-without-confirm
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      DELETE endpoint tidak require konfirmasi (header `X-Confirm-Delete`
+      atau body `confirm: true`). Attacker bisa trigger delete via
+      CSRF atau user yang tidak sengaja klik. OWASP API5:2023.
+    metadata:
+      cwe: "CWE-840: Business Logic Errors"
+      owasp-api: "API5:2023 Broken Function Level Authorization"
+    pattern-regex: '\.(delete|remove|destroy)\s*\(\s*["''][^"'']*["'']\s*,\s*(?:async\s*)?\([^)]*\)\s*=>'
+
+  - id: api-elevated-no-2fa
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Endpoint privilege-elevation (admin, role change, password
+      reset) tanpa 2FA / step-up auth. OWASP API5:2023.
+    metadata:
+      cwe: "CWE-287: Improper Authentication"
+      owasp-api: "API5:2023 Broken Function Level Authorization"
+    pattern-regex: '\.(post|put|patch)\s*\(\s*["''][^"'']*(?:admin|role|grant|elevate|promote|change-password|reset-password)'
+
+  # =========================================================================
+  # API7:2023 - Server Side Request Forgery (SSRF)
+  # =========================================================================
+
+  - id: api-ssrf-aws-metadata
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Request ke AWS/GCP metadata endpoint `169.254.169.254` atau
+      `metadata.google.internal` di-expose via user input. Attacker
+      bisa curi IAM credentials / tokens. OWASP API7:2023.
+    metadata:
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp-api: "API7:2023 Server Side Request Forgery"
+    pattern-regex: '(?:169\.254\.169\.254|metadata\.google\.internal|metadata\.internal)'
+
+  # =========================================================================
+  # API9:2023 - Improper Inventory Management
+  # =========================================================================
+
+  - id: api-version-exposure
+    languages: [javascript, typescript, python]
+    severity: INFO
+    message: >-
+      Response header `X-Powered-By` atau `Server` di-expose ke client.
+      Berikan info stack version yang attacker bisa pakai untuk exploit
+      known CVE. Disable. OWASP API9:2023.
+    metadata:
+      cwe: "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+      owasp-api: "API9:2023 Improper Inventory Management"
+    pattern-regex: '(?:res\.setHeader\s*\(\s*["'']X-Powered-By["'']|X-Powered-By\s*[:=]|app\.use\s*\(\s*["'']morgan\s*["''])'
+
+  - id: api-debug-mode
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Debug mode aktif di production (Flask `debug=True`, Express
+      `NODE_ENV=development`, atau Django `DEBUG = True`). Pakai env
+      var `DEBUG=0` / `FLASK_DEBUG=0` di production. OWASP API9:2023.
+    metadata:
+      cwe: "CWE-489: Active Debug Code"
+      owasp-api: "API9:2023 Improper Inventory Management"
+    pattern-regex: '(?:debug\s*=\s*True|FLASK_DEBUG\s*=\s*1|NODE_ENV\s*[:=]\s*["'']development["'']|DEBUG\s*=\s*True)'

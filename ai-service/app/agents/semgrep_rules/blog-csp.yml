@@ -1,0 +1,237 @@
+# Semgrep custom rules for blog security headers (Content-Security-Policy).
+# This file is enabled by scan_directives.py for detected_domain='blog'.
+
+rules:
+
+  # =========================================================================
+  # Content-Security-Policy and security headers
+  # =========================================================================
+
+  - id: blog-csp-missing
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Response handler without Content-Security-Policy header. CSP
+      protects against XSS, clickjacking, and code injection. Set
+      CSP via helmet() in Express or Flask-Talisman.
+    metadata:
+      cwe: "CWE-1021: Improper Restriction of Rendered UI Layers"
+      owasp: "A05:2021 Security Misconfiguration"
+      owasp-api: "API8:2023 Security Misconfiguration"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $APP.$METHOD("/$ROUTE", $H)
+          - pattern: |
+              router.$METHOD("/$ROUTE", $H)
+      - pattern-not: |
+          $APP.$METHOD("/$ROUTE", helmet(), $H)
+      - pattern-not: |
+          $APP.$METHOD("/$ROUTE", $H)
+          ...
+          res.setHeader("Content-Security-Policy", ...)
+
+  - id: blog-xss-product-render
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      innerHTML with user-controlled data on blog (comments, posts).
+      Use textContent or DOMPurify. This is the most common XSS
+      vector for blogs.
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+      owasp: "A03:2021 Injection"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $EL.innerHTML = $REQ.body.comment
+          - pattern: |
+              $EL.innerHTML = $REQ.body.post
+          - pattern: |
+              <div dangerouslySetInnerHTML={{__html: $REQ.body.content}} />
+          - pattern: |
+              <span dangerouslySetInnerHTML={{__html: $REQ.body.title}} />
+
+  - id: blog-open-redirect
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Open redirect vulnerability. User-controlled URL used in
+      res.redirect() allows phishing. Validate URL against an
+      allowlist of internal paths.
+    metadata:
+      cwe: "CWE-601: URL Redirection to Untrusted Site"
+      owasp: "A01:2021 Broken Access Control"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              res.redirect($REQ.query.next)
+          - pattern: |
+              res.redirect($REQ.query.url)
+          - pattern: |
+              res.redirect($REQ.body.redirect_to)
+          - pattern: |
+              return redirect($REQ.args.get("next"))
+
+  - id: blog-file-upload-no-validation
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      File upload without extension/MIME validation. Blog post
+      attachments (images, files) can be used to upload web shells.
+      Validate file extension AND MIME type. Reject .php, .jsp, .exe.
+    metadata:
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      owasp: "A04:2021 Insecure Design"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $REQ.files.image.mv($PATH)
+          - pattern: |
+              $REQ.files.attachment.save($PATH)
+      - pattern-not: |
+          if ($EXT in $ALLOWED): ...
+      - pattern-not: |
+          $EXT = path.extname($REQ.files.image.name)
+          if ($EXT in $ALLOWED): ...
+
+  - id: blog-markdown-xss
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Markdown rendering without sanitization. Use DOMPurify or marked
+      with sanitize:true. Blog comments often use markdown and
+      attackers can inject <script> via [link](javascript:...) or
+      <img onerror=...>.
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+      owasp: "A03:2021 Injection"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              marked($REQ.body.content)
+          - pattern: |
+              marked.parse($REQ.body.comment)
+      - pattern-not: |
+          DOMPurify.sanitize(marked($REQ.body.content))
+      - pattern-not: |
+          marked($REQ.body.content, {sanitize: true})
+
+  # =========================================================================
+  # Comment system + XSS variants
+  # =========================================================================
+
+  - id: blog-comment-stored-xss
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      HTML comment / post body di-render dengan `innerHTML`,
+      `$el.html()`, atau `dangerouslySetInnerHTML` dari user input.
+      Stored XSS. Pakai `textContent` / `DOMPurify.sanitize` / `bleach.clean`.
+      CWE-79 / OWASP A03:2021.
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+      owasp: "A03:2021 Injection"
+      ai-devsecops-source: blog-csp.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $EL.innerHTML = $REQ.body.$FIELD
+          - pattern: |
+              $EL.html($USER_CONTENT)
+          - pattern: |
+              <div dangerouslySetInnerHTML={{__html: $USER_CONTENT}} />
+          - pattern: |
+              return Markup($USER_CONTENT)
+          - pattern: |
+              return mark_safe($USER_CONTENT)
+
+  - id: blog-javascript-link-markdown
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Markdown link dengan `javascript:` scheme di-post tanpa filter.
+      Attacker bisa inject `<a href="javascript:alert(1)">` via
+      `[click](javascript:alert(1))`. Disable javascript: URL.
+      CWE-79.
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+      owasp: "A03:2021 Injection"
+      ai-devsecops-source: blog-csp.yml
+    pattern-regex: '\[.*?\]\(\s*javascript:'
+
+  - id: blog-open-redirect-via-next
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      `res.redirect(req.query.next)` atau `redirect(request.GET.get('next'))`
+      tanpa validasi whitelist. Attacker bisa pakai
+      `/login?next=https://evil.com` untuk phishing. CWE-601.
+    metadata:
+      cwe: "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+      owasp: "A01:2021 Broken Access Control"
+      ai-devsecops-source: blog-csp.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              res.redirect($REQ.query.next)
+          - pattern: |
+              res.redirect($REQ.query.url)
+          - pattern: |
+              res.redirect($REQ.query.redirect)
+          - pattern: |
+              return redirect(request.args.get("next"))
+          - pattern: |
+              return redirect(request.GET.get("next"))
+      - pattern-not: |
+          res.redirect(WHITELIST_HOST($REQ.query.next))
+
+  - id: blog-cookie-no-httponly
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      Set-Cookie tanpa `httpOnly: true` dan `secure: true`. Session
+      cookie vulnerable to XSS theft. Selalu set `httpOnly` untuk
+      session cookies. CWE-1004.
+    metadata:
+      cwe: "CWE-1004: Sensitive Cookie Without 'HttpOnly' Flag"
+      owasp: "A05:2021 Security Misconfiguration"
+      ai-devsecops-source: blog-csp.yml
+    pattern-regex: '(?:res\.cookie\s*\([^)]*\{[^}]*\}|Set-Cookie:\s*[^;]*(?!HttpOnly))'
+
+  - id: blog-user-enumeration
+    languages: [javascript, typescript, python]
+    severity: INFO
+    message: >-
+      Forgot-password / login response berbeda untuk user yang ada
+      vs tidak. Attacker bisa enumerate registered emails. Pakai
+      generic "If the email exists, ..." message. CWE-204.
+    metadata:
+      cwe: "CWE-204: Observable Response Discrepancy"
+      owasp: "A07:2021 Identification and Authentication Failures"
+      ai-devsecops-source: blog-csp.yml
+    pattern-regex: 'if\s*\(\s*user\s*==\s*None\s*\)\s*[\s\S]{0,80}return\s+(?:["'']User not found["'']|404)'
+
+  - id: blog-idor-post-edit
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      Post/comment update endpoint cek `post_id` di URL tapi tidak
+      verify `post.author_id == req.user.id`. Attacker bisa edit
+      post orang lain dengan enumerate ID. CWE-639 / OWASP API1:2023.
+    metadata:
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+      owasp-api: "API1:2023 Broken Object Level Authorization"
+      ai-devsecops-source: blog-csp.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $APP.put("/posts/:id", $H)
+          - pattern: |
+              $APP.patch("/posts/:id", $H)
+          - pattern: |
+              $APP.delete("/posts/:id", $H)
+          - pattern: |
+              $APP.put("/comments/:id", $H)
+      - pattern-not: |
+          $APP.put("/posts/:id", requireOwner, $H)

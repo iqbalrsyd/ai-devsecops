@@ -1,0 +1,623 @@
+# DevSecOps Security Pipeline
+# Note: SHA pinning bukan penyebab hanya satu job yang jalan.
+# Penyebab utamanya:
+#   1. Hanya 1 dari 5 stage yang diimplementasikan sebagai job (per-service-sast).
+#   2. Job build hardcoded .NET, padahal repo ini pakai Go, Node.js, dan Python.
+#      Build gagal -> per-service-sast (needs: build) tidak jalan.
+#   3. detect-services tidak punya fallback jika tidak ada Dockerfile.
+#   4. Job k8s-scan, terraform-scan, kube-bench tidak punya guard untuk direktori
+#      yang tidak ada.
+# Workflow ini memperbaiki semua masalah di atas dan PIN semua action ke SHA.
+
+name: DevSecOps Security Pipeline
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  packages: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ============================================================
+  # DISCOVERY
+  # ============================================================
+  detect-services:
+    name: Detect Microservices
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      services: ${{ steps.detect.outputs.services }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Detect service directories
+        id: detect
+        run: |
+          services=$(find . -name "Dockerfile" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/.venv/*" \
+            -not -path "*/vendor/*" \
+            | sed 's|/Dockerfile||' \
+            | sed 's|^./||' \
+            | sort -u \
+            | jq -R -s -c 'split("\n")[:-1]')
+
+          # Fallback: kalau tidak ada Dockerfile, anggap root sebagai satu service
+          if [ "$services" = "[]" ] || [ -z "$services" ]; then
+            services='["."]'
+          fi
+
+          echo "services=$services" >> "$GITHUB_OUTPUT"
+          echo "matrix={\"service\":$(echo "$services")}" >> "$GITHUB_OUTPUT"
+          echo "Detected services: $services"
+
+  # ============================================================
+  # LINT & TEST (per service, dengan deteksi bahasa)
+  # ============================================================
+  lint:
+    name: Code Linting
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: detect-services
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-services.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Detect language
+        id: lang
+        run: |
+          svc="${{ matrix.service }}"
+          if [ -f "$svc/go.mod" ]; then
+            echo "lang=go" >> "$GITHUB_OUTPUT"
+          elif [ -f "$svc/package.json" ]; then
+            echo "lang=node" >> "$GITHUB_OUTPUT"
+          elif [ -f "$svc/requirements.txt" ] || [ -f "$svc/pyproject.toml" ]; then
+            echo "lang=python" >> "$GITHUB_OUTPUT"
+          else
+            echo "lang=unknown" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Detected language: $(cat "$GITHUB_OUTPUT" | grep '^lang=' | cut -d= -f2)"
+
+      - name: Setup Go
+        if: steps.lang.outputs.lang == 'go'
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.0.0
+        with:
+          go-version: '1.22'
+          cache-dependency-path: ${{ matrix.service }}/go.sum
+
+      - name: Lint Go
+        if: steps.lang.outputs.lang == 'go'
+        run: cd "${{ matrix.service }}" && go vet ./...
+
+      - name: Setup Node.js
+        if: steps.lang.outputs.lang == 'node'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      - name: Install Node dependencies
+        if: steps.lang.outputs.lang == 'node'
+        run: cd "${{ matrix.service }}" && npm ci
+
+      - name: Lint Node
+        if: steps.lang.outputs.lang == 'node'
+        run: cd "${{ matrix.service }}" && npm run lint
+
+      - name: Setup Python
+        if: steps.lang.outputs.lang == 'python'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Lint Python
+        if: steps.lang.outputs.lang == 'python'
+        run: |
+          cd "${{ matrix.service }}"
+          pip install ruff
+          ruff check .
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-services.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Detect language
+        id: lang
+        run: |
+          svc="${{ matrix.service }}"
+          if [ -f "$svc/go.mod" ]; then echo "lang=go" >> "$GITHUB_OUTPUT";
+          elif [ -f "$svc/package.json" ]; then echo "lang=node" >> "$GITHUB_OUTPUT";
+          else echo "lang=unknown" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Setup Go
+        if: steps.lang.outputs.lang == 'go'
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.0.0
+        with:
+          go-version: '1.22'
+
+      - name: Test Go
+        if: steps.lang.outputs.lang == 'go'
+        run: cd "${{ matrix.service }}" && go test ./... -coverprofile=coverage.out
+
+      - name: Setup Node.js
+        if: steps.lang.outputs.lang == 'node'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      - name: Install Node dependencies
+        if: steps.lang.outputs.lang == 'node'
+        run: cd "${{ matrix.service }}" && npm ci
+
+      - name: Test Node
+        if: steps.lang.outputs.lang == 'node'
+        run: |
+          cd "${{ matrix.service }}"
+          if npm run | grep -q '^\s*test$'; then
+            npm test -- --coverage
+          else
+            echo "::notice::Tidak ada script test di ${{ matrix.service }}, melewati."
+          fi
+
+  # ============================================================
+  # BUILD (per service, dengan deteksi bahasa)
+  # ============================================================
+  build:
+    name: Build Services
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [detect-services, lint]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-services.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Detect language
+        id: lang
+        run: |
+          svc="${{ matrix.service }}"
+          if [ -f "$svc/go.mod" ]; then echo "lang=go" >> "$GITHUB_OUTPUT";
+          elif [ -f "$svc/package.json" ]; then echo "lang=node" >> "$GITHUB_OUTPUT";
+          elif [ -f "$svc/requirements.txt" ] || [ -f "$svc/pyproject.toml" ]; then echo "lang=python" >> "$GITHUB_OUTPUT";
+          else echo "lang=unknown" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Setup Go
+        if: steps.lang.outputs.lang == 'go'
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.0.0
+        with:
+          go-version: '1.22'
+
+      - name: Build Go
+        if: steps.lang.outputs.lang == 'go'
+        run: cd "${{ matrix.service }}" && go build ./...
+
+      - name: Setup Node.js
+        if: steps.lang.outputs.lang == 'node'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ${{ matrix.service }}/package-lock.json
+
+      - name: Build Node
+        if: steps.lang.outputs.lang == 'node'
+        run: cd "${{ matrix.service }}" && npm ci && npm run build
+
+      - name: Install Python dependencies
+        if: steps.lang.outputs.lang == 'python'
+        run: |
+          cd "${{ matrix.service }}"
+          pip install -r requirements.txt
+
+  # ============================================================
+  # 5 STAGES UTAMA (dari generator AI)
+  # ============================================================
+
+  # Stage 1: SAST per service
+  per-service-sast:
+    name: SAST Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [detect-services, build]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-services.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      # semgrep/semgrep-action@v1 tidak punya input path/scanRoot.
+      # Gunakan image Docker semgrep langsung supaya bisa scan per service.
+      - name: Run Semgrep
+        run: |
+          docker run --rm \
+            -v "$PWD:/src:ro" \
+            returntocorp/semgrep:1.99.0 \
+            semgrep --config=p/default \
+                    --config=p/owasp-top-ten \
+                    --config=p/javascript \
+                    --config=p/nodejs \
+                    --config=p/expressjs \
+                    --config=p/sql-injection \
+                    --config=p/secrets \
+                    --config=p/dockerfile \
+                    --sarif \
+                    --output=semgrep-${{ matrix.service }}.sarif \
+                    --timeout=600 \
+                    /src/${{ matrix.service }}
+        continue-on-error: true
+
+      - name: Upload Semgrep SARIF
+        if: success() || failure()
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
+        with:
+          sarif_file: semgrep-${{ matrix.service }}.sarif
+
+  # Stage 2: Dependency scan per service
+  per-service-dep-scan:
+    name: Dependency CVE Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [detect-services, lint]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-services.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Run Trivy dependency scan
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: 'fs'
+          scan-ref: '${{ matrix.service }}'
+          format: 'sarif'
+          output: 'trivy-${{ matrix.service }}-deps.sarif'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Upload dependency scan results
+        if: success() || failure()
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
+        with:
+          sarif_file: 'trivy-${{ matrix.service }}-deps.sarif'
+
+  # Stage 3: API Gateway test (nginx.conf)
+  api-gateway-test:
+    name: API Gateway Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: detect-services
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Check nginx config exists
+        id: nginx-check
+        run: |
+          if [ -f "nginx.conf" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::nginx.conf tidak ditemukan, melewati API gateway test."
+          fi
+
+      - name: Validate nginx configuration
+        if: steps.nginx-check.outputs.found == 'true'
+        run: |
+          docker run --rm -v "$PWD/nginx.conf:/etc/nginx/nginx.conf:ro" nginx:alpine nginx -t
+
+      - name: Scan nginx config with Trivy
+        if: steps.nginx-check.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: config
+          scan-ref: 'nginx.conf'
+          format: sarif
+          output: 'trivy-nginx.sarif'
+
+      - name: Upload nginx scan results
+        if: steps.nginx-check.outputs.found == 'true' && (success() || failure())
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
+        with:
+          sarif_file: 'trivy-nginx.sarif'
+
+  # Stage 4: Service mesh audit (conditional)
+  service-mesh-audit:
+    name: Service Mesh Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: detect-services
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Check for service mesh configs
+        id: mesh-check
+        run: |
+          found=false
+          patterns=("istio" "linkerd" "consul" "kuma")
+          for p in "${patterns[@]}"; do
+            if find . -type f \( -name "*.yaml" -o -name "*.yml" \) \
+                -not -path "*/node_modules/*" \
+                -not -path "*/.git/*" \
+                | xargs grep -il "$p" 2>/dev/null | head -1 >/dev/null; then
+              found=true
+              break
+            fi
+          done
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+          if [ "$found" = "false" ]; then
+            echo "::notice::Tidak ditemukan konfigurasi service mesh (Istio/Linkerd/Consul/Kuma), melewati audit."
+          fi
+
+      - name: Run Checkov on service mesh configs
+        if: steps.mesh-check.outputs.found == 'true'
+        uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff # v12.3107.0
+        with:
+          directory: '.'
+          framework: kubernetes
+          output_format: sarif
+          output: 'checkov-mesh-results.sarif'
+
+      - name: Upload mesh audit results
+        if: steps.mesh-check.outputs.found == 'true' && (success() || failure())
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
+        with:
+          sarif_file: 'checkov-mesh-results.sarif'
+
+  # Stage 5: Secret scan whole repo
+  secret-scan-all:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: detect-services
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+  # ============================================================
+  # CONTAINER BUILD & SCAN (per service, digabung karena image
+  # antar-job tidak dibagikan runner GitHub Actions)
+  # ============================================================
+  container-build-scan:
+    name: Container Build & Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [detect-services, lint]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-services.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Check Dockerfile exists
+        id: df-check
+        run: |
+          if [ -f "${{ matrix.service }}/Dockerfile" ]; then
+            echo "has_dockerfile=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_dockerfile=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Dockerfile tidak ditemukan di ${{ matrix.service }}, melewati container build & scan."
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.df-check.outputs.has_dockerfile == 'true'
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Build Docker image
+        if: steps.df-check.outputs.has_dockerfile == 'true'
+        run: |
+          docker build -f "${{ matrix.service }}/Dockerfile" \
+            -t "${{ matrix.service }}:ci" \
+            "${{ matrix.service }}"
+
+      - name: Scan container image
+        if: steps.df-check.outputs.has_dockerfile == 'true'
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: image
+          image-ref: '${{ matrix.service }}:ci'
+          format: sarif
+          output: 'trivy-${{ matrix.service }}-image.sarif'
+        continue-on-error: true
+
+      - name: Upload container scan results
+        if: steps.df-check.outputs.has_dockerfile == 'true' && (success() || failure())
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
+        with:
+          sarif_file: 'trivy-${{ matrix.service }}-image.sarif'
+
+  # ============================================================
+  # KUBERNETES & TERRAFORM SCAN (conditional)
+  # ============================================================
+  k8s-scan:
+    name: Kubernetes Manifest Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: detect-services
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Check for Kubernetes manifests
+        id: k8s-check
+        run: |
+          if find . -type f \( -name '*.yaml' -o -name '*.yml' \) \
+              -not -path "*/node_modules/*" \
+              -not -path "*/.git/*" \
+              | xargs grep -l '^kind:' 2>/dev/null | head -1 >/dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tidak ditemukan Kubernetes manifest, melewati K8s scan."
+          fi
+
+      - name: Run Checkov on Kubernetes manifests
+        if: steps.k8s-check.outputs.found == 'true'
+        uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff # v12.3107.0
+        with:
+          directory: '.'
+          framework: kubernetes
+          output_format: sarif
+          output: 'checkov-k8s-results.sarif'
+
+      - name: Upload K8s security results
+        if: steps.k8s-check.outputs.found == 'true' && (success() || failure())
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
+        with:
+          sarif_file: 'checkov-k8s-results.sarif'
+
+  kube-bench:
+    name: Kubernetes Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: detect-services
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Check for Kubernetes manifests
+        id: check-k8s
+        run: |
+          if find . -type f \( -name '*.yaml' -o -name '*.yml' \) \
+              -not -path "*/node_modules/*" \
+              -not -path "*/.git/*" \
+              | xargs grep -l '^kind:' 2>/dev/null | head -1 >/dev/null; then
+            echo "has_k8s=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_k8s=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tidak ada cluster K8s yang aktif; kube-bench memerlukan cluster."
+          fi
+
+      - name: Run kube-bench (dry-run if no cluster)
+        if: steps.check-k8s.outputs.has_k8s == 'true'
+        run: |
+          echo "kube-bench memerlukan cluster Kubernetes yang aktif."
+          echo "Jalankan kube-bench di cluster CI/production, atau gunakan Checkov untuk manifest scanning."
+
+  terraform-scan:
+    name: Terraform IaC Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: detect-services
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Find Terraform files
+        id: find-tf
+        run: |
+          tf_file=$(find . -name '*.tf' -not -path "*/.terraform/*" -print -quit)
+          if [ -n "$tf_file" ]; then
+            tf_dir=$(dirname "$tf_file")
+            echo "has_tf=true" >> "$GITHUB_OUTPUT"
+            echo "tf_dir=$tf_dir" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tf=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tidak ditemukan file Terraform, melewati IaC scan."
+          fi
+
+      - name: Setup Terraform
+        if: steps.find-tf.outputs.has_tf == 'true'
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: '1.5.0'
+
+      - name: Terraform Init
+        if: steps.find-tf.outputs.has_tf == 'true'
+        working-directory: ${{ steps.find-tf.outputs.tf_dir }}
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        if: steps.find-tf.outputs.has_tf == 'true'
+        working-directory: ${{ steps.find-tf.outputs.tf_dir }}
+        run: terraform validate
+
+      - name: Run Checkov on Terraform
+        if: steps.find-tf.outputs.has_tf == 'true'
+        uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff # v12.3107.0
+        with:
+          directory: '${{ steps.find-tf.outputs.tf_dir }}'
+          framework: terraform
+          output_format: sarif
+          output: 'checkov-tf-results.sarif'
+
+      - name: Upload IaC security results
+        if: steps.find-tf.outputs.has_tf == 'true' && (success() || failure())
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
+        with:
+          sarif_file: 'checkov-tf-results.sarif'
+
+  # ============================================================
+  # FULL REPO CVE SCAN
+  # ============================================================
+  cve-scan:
+    name: Full Repository CVE Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: detect-services
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Run Trivy CVE scan
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-cve-results.sarif'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Upload CVE results
+        if: success() || failure()
+        uses: github/codeql-action/upload-sarif@8272c299f21ca24af15dfe9ac0971ba969e5e0d5 # v3.36.2
+        with:
+          sarif_file: 'trivy-cve-results.sarif'

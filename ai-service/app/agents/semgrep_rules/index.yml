@@ -1,0 +1,27 @@
+# Index of custom Semgrep rules per domain.
+# Each entry maps a domain (from domain_detection_node) to a list of
+# Semgrep rule files that should be enabled for that domain.
+#
+# v9.4 (sinkron naskah baru) — per rekomendasi-judul.md:
+#   Hanya 3 domain yang didukung: e-commerce, blog, iot (R2.2 — pengerucutan
+#   7→3 domain). Domain lain (healthcare, fintech, education, general) sudah
+#   dihapus dari pipeline utama. File rule lama yang masih ada di direktori
+#   adalah artefak historis dan TIDAK lagi di-referensi dari sini.
+#
+#   Judul skripsi: "Model Adaptive Security Assessment Pipeline Berbasis
+#   Analisis Domain-Aware Repository untuk Evaluasi Keamanan"
+#
+# The mapping here is mirrored in app/agents/scan_directives.py so
+# that the workflow generator and the inference node agree on which
+# rule files to push to .semgrep/.
+
+domain_rules:
+  general-api:
+    - owasp-api.yml
+  e-commerce:
+    - ecommerce.yml
+  blog:
+    - blog-csp.yml
+  iot:
+    - iot-mqtt.yml
+  general: []

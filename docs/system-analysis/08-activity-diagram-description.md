@@ -1,0 +1,552 @@
+# 8. Activity Diagram Description
+
+## 8.1 Repository Analysis Activity Flow
+
+### Activity Flow with Branching
+
+```
+START
+  │
+  ▼
+┌──────────────────────────┐
+│ User selects repository  │
+│ and clicks "Analyze"     │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│ System creates           │
+│ AnalysisJob record       │
+│ (status: "queued")       │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│ Worker dequeues job      │
+│ from Redis queue         │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│ Attempt shallow clone    │
+│ git clone --depth=1      │
+└────────────┬─────────────┘
+             │
+             ▼
+      ┌─────────────────┐
+      │ Clone successful?│
+      └────┬────────┬───┘
+           │ Yes    │ No
+           ▼        ▼
+   ┌──────────┐  ┌──────────────────┐
+   │ Scan file│  │ Fallback to      │
+   │ tree     │  │ GitHub Tree API  │
+   │ locally  │  │ (no local clone) │
+   └────┬─────┘  └────────┬─────────┘
+        │                 │
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Identify manifest│
+        │ files from tree  │
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Count file       │
+        │ extensions for   │
+        │ language distrib.│
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐      ┌──────────────────┐
+        │ Token count <    │ No   │ Truncate file    │
+        │ LLM context limit?├─────▶│ tree to fit      │
+        └────────┬─────────┘      │ context window   │
+                 │ Yes            └────────┬─────────┘
+                 │                         │
+                 └─────────┬───────────────┘
+                           │
+                           ▼
+                  ┌─────────────────┐
+                  │ Call OpenRouter  │
+                  │ LLM for tech     │
+                  │ classification   │
+                  └────────┬────────┘
+                           │
+                           ▼
+                  ┌─────────────────┐
+                  │ Parse structured │
+                  │ JSON response    │
+                  └────────┬────────┘
+                           │
+                           ▼
+                  ┌─────────────────┐
+                  │ Cross-validate   │
+                  │ LLM results      │
+                  │ vs. deterministic│
+                  │ patterns         │
+                  └────────┬────────┘
+                           │
+                           ▼
+                  ┌─────────────────┐
+                  │ All confidences  │
+                  │ >= 0.7?         │
+                  └────┬────────┬───┘
+                       │ Yes    │ No
+                       ▼        ▼
+              ┌──────────┐  ┌──────────────────┐
+              │ Persist  │  │ Mark uncertain    │
+              │ results  │  │ detections for    │
+              │ to DB    │  │ user confirmation │
+              └────┬─────┘  └────────┬─────────┘
+                   │                 │
+                   └────────┬────────┘
+                            │
+                            ▼
+                   ┌─────────────────┐
+                   │ Update job       │
+                   │ status to        │
+                   │ "completed"      │
+                   └────────┬────────┘
+                            │
+                            ▼
+                   ┌─────────────────┐
+                   │ Publish Redis    │
+                   │ notification     │
+                   │ via WebSocket    │
+                   └────────┬────────┘
+                            │
+                            ▼
+                          END
+```
+
+### Branching Conditions Summary
+
+| Branch Point | Condition | Primary Path | Alternative Path |
+|---|---|---|---|
+| Clone success | `git clone` returns exit code 0 | Scan local file tree | Use GitHub Tree API (limited file analysis) |
+| Token limit | Prompt token count < 7000 | Send full context to LLM | Truncate file tree, omit non-key files |
+| Confidence threshold | All `confidence >= 0.7` | Auto-accept results | Flag as uncertain; user confirmation required |
+| Monorepo detection | Multiple build manifests in subdirs | Single analysis | Branch into per-workspace sub-analysis |
+
+---
+
+## 8.2 Workflow Generation Activity Flow
+
+### Activity Flow with Branching
+
+```
+START
+  │
+  ▼
+┌──────────────────────────┐
+│ User configures workflow  │
+│ - Triggers (push, PR,     │
+│   schedule, manual)      │
+│ - Security tools to       │
+│   include                │
+│ - Target branch           │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│ Validate user config     │
+│ - At least 1 trigger?    │
+│ - Valid branch name?     │
+└────────────┬─────────────┘
+             │
+             ▼
+      ┌─────────────────┐
+      │ Config valid?   │
+      └────┬────────┬───┘
+           │ Yes    │ No
+           ▼        ▼
+   ┌──────────┐  ┌──────────────────┐
+   │ Continue │  │ Return validation │
+   │          │  │ errors to user    │
+   └────┬─────┘  └──────────────────┘
+        │              (retry)
+        │
+        ▼
+┌──────────────────────────┐
+│ Fetch analysis results    │
+│ (technologies detected)  │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│ Security Requirement      │
+│ Agent: infer required    │
+│ security gates + tools   │
+│ [LLM Call: primary]      │
+└────────────┬─────────────┘
+             │
+             ▼
+      ┌─────────────────┐
+      │ Security tools   │ No  ┌──────────────────┐
+      │ selected by user?│────▶│ Add mandatory      │
+      └────────┬─────────┘     │ minimum: Gitleaks  │
+               │ Yes           │ + one SAST tool    │
+               ▼               └────────┬──────────┘
+       ┌──────────────┐                │
+       │ Use user's    │                │
+       │ selection     │                │
+       └──────┬───────┘                │
+              │                         │
+              └─────────┬───────────────┘
+                        │
+                        ▼
+               ┌─────────────────┐
+               │ Build generation │
+               │ context: tech +  │
+               │ security +       │
+               │ constraints      │
+               └────────┬────────┘
+                        │
+                        ▼
+               ┌─────────────────┐
+               │ Workflow Gen     │
+               │ Agent: LLM call  │
+               │ [Model: secondary]│
+               └────────┬────────┘
+                        │
+                        ▼
+               ┌─────────────────┐
+               │ Post-process     │
+               │ - Strip markdown │
+               │ - Validate YAML  │
+               │ - Format indent  │
+               │ - Add header     │
+               └────────┬────────┘
+                        │
+                        ▼
+               ┌─────────────────┐
+               │ Route to         │
+               │ Workflow         │
+               │ Validator Agent  │
+               └────────┬────────┘
+                        │
+                        ▼
+               ┌─────────────────┐
+               │ YAML parseable? │
+               └────┬────────┬───┘
+                    │ Yes    │ No
+                    ▼        ▼
+            ┌──────────┐  ┌──────────────────┐
+            │ Schema    │  │ Mark SYNTAX_ERROR│
+            │ validation│  │ → Repair Agent   │
+            └────┬─────┘  └──────────────────┘
+                 │
+                 ▼
+          ┌─────────────────┐
+          │ Schema valid?   │
+          └────┬────────┬───┘
+               │ Yes    │ No
+               ▼        ▼
+       ┌──────────┐  ┌──────────────────┐
+       │ Security  │  │ Mark SCHEMA_ERROR│
+       │ policy    │  │ → Repair Agent   │
+       │ validation│  └──────────────────┘
+       └────┬─────┘
+            │
+            ▼
+     ┌─────────────────┐
+     │ Policy valid?   │
+     └────┬────────┬───┘
+          │ Yes    │ No
+          ▼        ▼
+  ┌──────────┐  ┌──────────────────┐
+  │ Semantic  │  │ Mark             │
+  │ validation│  │ POLICY_VIOLATION │
+  │ (LLM)     │  │ → Repair Agent   │
+  └────┬─────┘  └──────────────────┘
+       │
+       ▼
+┌─────────────────┐
+│ Semantic valid? │
+└────┬────────┬───┘
+     │ Yes    │ No
+     ▼        ▼
+┌──────────┐  ┌──────────────────┐
+│ Set       │  │ Mark             │
+│ validation│  │ SEMANTIC_ERROR   │
+│ passed =  │  │ → Repair Agent   │
+│ true      │  └──────────────────┘
+└────┬─────┘
+     │
+     ▼
+┌──────────────────────────┐
+│ Return workflow +        │
+│ explanations to frontend │
+└────────────┬─────────────┘
+             │
+             ▼
+           END
+```
+
+### Branching Conditions Summary
+
+| Branch Point | Condition | Primary | Alternative |
+|---|---|---|---|
+| User config valid | Triggers not empty, branch exists | Continue | Show validation errors; retry |
+| Security tools selected | `enabled_tools.length > 0` | Use selection | Inject mandatory baseline (Gitleaks + 1 SAST) |
+| YAML parseable | `yaml.safe_load()` succeeds | Schema validation | Syntax repair |
+| Schema valid | JSON Schema validation passes | Policy validation | Schema repair |
+| Policy valid | All security policies pass | Semantic validation | Policy repair |
+| Semantic valid | LLM confirms logical correctness | Set passed=true | Semantic repair |
+| Monorepo detected | Multiple build manifests | Matrix strategy | Single-job workflow |
+| Docker detected | Dockerfile present | Add Trivy image scan | Skip container scan |
+
+---
+
+## 8.3 Workflow Self-Correction (Repair) Activity Flow
+
+```
+START
+  │
+  ▼
+┌──────────────────────────┐
+│ Receive validation       │
+│ errors from Validator    │
+│ Agent                    │
+└────────────┬─────────────┘
+             │
+             ▼
+      ┌─────────────────┐
+      │ Repair attempt   │ Yes  ┌──────────────────┐
+      │ count >= 3?      │─────▶│ Set status to     │
+      └────────┬─────────┘      │ "repair_failed"   │
+               │ No             │ → Manual Review   │
+               ▼                └──────────────────┘
+      ┌─────────────────┐
+      │ Classify errors  │
+      │ by category:     │
+      │ - Syntax         │
+      │ - Schema         │
+      │ - Policy         │
+      │ - Semantic       │
+      └────────┬─────────┘
+               │
+               ▼
+      ┌─────────────────┐
+      │ Check for repair │ Yes  ┌──────────────────┐
+      │ loop (hash of    │─────▶│ Set status to     │
+      │ YAML + errors    │      │ "repair_stuck"    │
+      │ already seen?)   │      │ → Manual Review   │
+      └────────┬─────────┘      └──────────────────┘
+               │ No
+               ▼
+      ┌─────────────────┐
+      │ Apply fixes by   │
+      │ category         │
+      │ (in priority      │
+      │  order)          │
+      └────────┬─────────┘
+               │
+    ┌──────────┼──────────┐
+    │          │          │
+    ▼          ▼          ▼
+┌────────┐┌────────┐┌────────┐
+│Syntax  ││Schema  ││Policy  │
+│Repair  ││Repair  ││Repair  │
+│(regex/ ││(default ││(template│
+│formatter)│values) ││insert) │
+└───┬────┘└───┬────┘└───┬────┘
+    │         │         │
+    └─────────┼─────────┘
+              │ (remaining unfixed errors)
+              ▼
+      ┌─────────────────┐
+      │ Semantic errors  │ Yes  ┌──────────────────┐
+      │ remain?          │─────▶│ LLM-based         │
+      └────────┬─────────┘      │ semantic repair   │
+               │ No             │ [Model: secondary]│
+               ▼                └────────┬─────────┘
+      ┌─────────────────┐               │
+      │ All errors       │               │
+      │ resolved?        │               │
+      └────┬────────┬───┘               │
+           │ Yes    │ No                │
+           ▼        ▼                   │
+   ┌──────────┐  ┌──────────────────┐   │
+   │ Set       │  │ Increment        │   │
+   │ repair    │  │ repair_attempts  │   │
+   │ status =  │  │                  │   │
+   │ "success" │  │                  │   │
+   └────┬─────┘  └────────┬─────────┘   │
+        │                 │              │
+        │                 ▼              │
+        │        ┌─────────────────┐     │
+        │        │ All remaining    │     │
+        │        │ errors fixable?  │     │
+        │        └────┬────────┬───┘     │
+        │             │ Yes    │ No      │
+        │             ▼        ▼         │
+        │     ┌──────────┐ ┌────────┐    │
+        │     │ Route to │ │ Route  │    │
+        │     │ Validator│ │ to     │    │
+        │     │ (re-test)│ │ Manual │    │
+        │     └──────────┘ │ Review │    │
+        │                  └────────┘    │
+        │                                │
+        └─────────┬──────────────────────┘
+                  │
+                  ▼
+                END
+```
+
+### Branching Conditions Summary
+
+| Branch Point | Condition | Action |
+|---|---|---|
+| Attempt limit | `repair_attempts >= 3` | Stop → Manual Review |
+| Loop detection | Current (YAML + errors) hash seen before | Stop → Manual Review |
+| Syntax errors present | Error type == "SYNTAX_ERROR" | Apply YAML auto-formatter |
+| Schema errors present | Error type == "SCHEMA_ERROR" | Apply default values |
+| Policy errors present | Error type == "POLICY_VIOLATION" | Insert template blocks |
+| Semantic errors remain | Error type == "SEMANTIC_ERROR" after deterministic fixes | Invoke LLM repair |
+| All resolved | `errors.length == 0` | Set success → re-validate |
+| Remaining fixable | All remaining errors have `fixable == true` | Re-route to Validator |
+| Remaining unfixable | Any error has `fixable == false` | Manual Review |
+
+---
+
+## 8.4 Security Risk Assessment Activity Flow
+
+```
+START
+  │
+  ▼
+┌──────────────────────────┐
+│ Workflow execution       │
+│ completed, artifacts     │
+│ downloaded & parsed      │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│ Collect all findings     │
+│ from all security tools  │
+│ (Semgrep, Gitleaks,      │
+│  Trivy, CodeQL, DepRev) │
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│ Deduplicate findings     │
+│ (same file+line+category)│
+└────────────┬─────────────┘
+             │
+             ▼
+┌──────────────────────────┐
+│ Apply false positive     │
+│ triage filter            │
+│ (exclude user-marked     │
+│  false positives)        │
+└────────────┬─────────────┘
+             │
+             ▼
+      ┌─────────────────┐
+      │ Any findings     │ No  ┌──────────────────┐
+      │ remaining?       │────▶│ Risk score = 0    │
+      └────────┬─────────┘     │ Category =        │
+               │ Yes           │ "MINIMAL"         │
+               ▼               │ Skip LLM assess.  │
+      ┌─────────────────┐      └────────┬─────────┘
+      │ Calculate weighted│              │
+      │ raw score:       │              │
+      │ Σ(severity_wt ×  │              │
+      │   cvss_mult ×    │              │
+      │   cwe_mult ×     │              │
+      │   exposure_mult) │              │
+      └────────┬─────────┘              │
+               │                        │
+               ▼                        │
+      ┌─────────────────┐              │
+      │ Normalize to     │              │
+      │ 0-100 scale      │              │
+      └────────┬─────────┘              │
+               │                        │
+               ▼                        │
+      ┌─────────────────┐              │
+      │ Map to risk      │              │
+      │ category:        │              │
+      │ >=75 → CRITICAL  │              │
+      │ >=50 → HIGH      │              │
+      │ >=25 → MEDIUM    │              │
+      │ >=10 → LOW       │              │
+      │ <10  → MINIMAL   │              │
+      └────────┬─────────┘              │
+               │                        │
+               ▼                        │
+      ┌─────────────────┐              │
+      │ Calculate trend  │              │
+      │ from historical  │              │
+      │ scores (linear   │              │
+      │ regression)      │              │
+      └────────┬─────────┘              │
+               │                        │
+               ▼                        │
+      ┌─────────────────┐              │
+      │ Risk score >= 25?│ No           │
+      └────┬────────┬───┘              │
+           │ Yes    │                  │
+           ▼        │                  │
+  ┌─────────────────┐│                  │
+  │ LLM Risk Assess.││                  │
+  │ [Model: primary]││                  │
+  │ Generate qual.   ││                  │
+  │ assessment:      ││                  │
+  │ - Key concerns   ││                  │
+  │ - Attack surface ││                  │
+  │ - Compliance      ││                  │
+  │   impact         ││                  │
+  │ - Urgency level  ││                  │
+  └────────┬─────────┘│                 │
+           │           │                 │
+           └─────┬─────┘                 │
+                 │                       │
+                 ▼                       │
+        ┌─────────────────┐             │
+        │ Persist risk     │◀────────────┘
+        │ assessment to DB │
+        └────────┬─────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Urgency ==       │ Yes  ┌──────────────────┐
+        │ "immediate"?     │─────▶│ Send high-priority │
+        └────────┬─────────┘      │ notification to   │
+                 │ No             │ user (email +     │
+                 │                │ in-app)           │
+                 ▼                └────────┬─────────┘
+        ┌─────────────────┐               │
+        │ Send standard    │               │
+        │ notification     │               │
+        └────────┬─────────┘               │
+                 │                         │
+                 └─────────┬───────────────┘
+                           │
+                           ▼
+                 ┌─────────────────┐
+                 │ Pass findings to │
+                 │ Recommendation   │
+                 │ Agent            │
+                 └────────┬────────┘
+                          │
+                          ▼
+                        END
+```
+
+### Branching Conditions Summary
+
+| Branch Point | Condition | Action |
+|---|---|---|
+| Any findings? | `findings.length == 0` | Set score=0, skip LLM |
+| LLM assessment needed? | `normalized_score >= 25` | Invoke qualitative LLM assessment |
+| Urgency | `urgency == "immediate"` | High-priority notification (email + push) |
+| Risk trend | Slope of regression line | "improving" / "stable" / "worsening" / "worsening_significantly" |
+| Critical finding detected | Any finding severity == "critical" | Auto-escalate; set urgency = "immediate" |
+| False positive rate > 30% | `false_positives / total_findings > 0.3` | Recommend tool configuration review |
