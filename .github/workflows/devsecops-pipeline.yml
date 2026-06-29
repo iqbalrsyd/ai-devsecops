@@ -390,7 +390,7 @@ jobs:
 
       - name: Run Checkov on service mesh configs
         if: steps.mesh-check.outputs.found == 'true'
-        uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff # v12.3107.0
+        uses: bridgecrewio/checkov-action@4a1afa9897f7afe297a3762c926e1e800361464f # v12.3111.0
         with:
           directory: '.'
           framework: kubernetes
@@ -501,7 +501,7 @@ jobs:
 
       - name: Run Checkov on Kubernetes manifests
         if: steps.k8s-check.outputs.found == 'true'
-        uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff # v12.3107.0
+        uses: bridgecrewio/checkov-action@4a1afa9897f7afe297a3762c926e1e800361464f # v12.3111.0
         with:
           directory: '.'
           framework: kubernetes
@@ -582,7 +582,7 @@ jobs:
 
       - name: Run Checkov on Terraform
         if: steps.find-tf.outputs.has_tf == 'true'
-        uses: bridgecrewio/checkov-action@fa9edf8f0a491c59a924ea6accd5bdcf07752cff # v12.3107.0
+        uses: bridgecrewio/checkov-action@4a1afa9897f7afe297a3762c926e1e800361464f # v12.3111.0
         with:
           directory: '${{ steps.find-tf.outputs.tf_dir }}'
           framework: terraform
