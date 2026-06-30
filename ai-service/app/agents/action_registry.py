@@ -257,6 +257,26 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         pinned_sha="e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e",
         pinned_version="v3.0.0",
     ),
+    "actions/github-script": ActionSpec(
+        owner_repo="actions/github-script",
+        # Available for future use. The original annotation→SARIF
+        # conversion was implemented via github-script calling
+        # `github.rest.actions.listWorkflowRunAnnotations` — that
+        # endpoint does not exist in the GitHub REST API, so the
+        # implementation moved to a Python step that parses the
+        # per-job log file directly. Kept in the registry so future
+        # generators can opt to use it.
+        supported_inputs=("script", "github-token", "debug", "user-agent", "result-encoding"),
+        required_env=("GITHUB_TOKEN",),
+        required_permissions=("actions", "contents"),
+        node_compatibility=("node24",),
+        pinned_sha="60a0d83039c74a4aee543508d2ffcb1c3799cdea",  # v7.0.1
+        pinned_version="v7.0.1",
+        notes=(
+            "v7.0.1 — available for future use. Permissions: "
+            "actions:read + contents:read."
+        ),
+    ),
     "returntocorp/semgrep-action": ActionSpec(
         owner_repo="returntocorp/semgrep-action",
         supported_inputs=(

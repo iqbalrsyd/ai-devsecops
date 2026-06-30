@@ -295,3 +295,156 @@ def test_domain_template_designs_count_per_domain():
         # No duplicate job names within a domain
         names = [d["name"] for d in designs]
         assert len(names) == len(set(names)), f"duplicate names in {domain}: {names}"
+
+
+def test_ai_job_emits_annotation_to_sarif_step():
+    """Regression: AI-generated jobs that include a `sarif_upload` action
+    must emit a Python step that converts `::error` / `::warning`
+    annotations from the upstream shell_check log into real SARIF
+    results. Otherwise the SARIF file is empty and the GitHub Code
+    Scanning tab never receives alerts from the AI-generated security
+    checks.
+
+    The implementation uses a per-job log file (`<cat>.shell_log`)
+    written by the shell_check wrapper (which `tee`s the script's
+    output to that file) and a `python3 - <<'PYEOF'` step that
+    parses the log and writes SARIF. This replaces an earlier
+    approach that called `github.rest.actions.listWorkflowRunAnnotations`
+    — that endpoint does not exist in the GitHub REST API.
+    """
+    import yaml
+    from app.agents.nodes.workflow_generator import _build_ai_job_from_design
+
+    design = {
+        "name": "blog-jwt-auth-hardening",
+        "coverage": "authentication_security",
+        "reasoning": "test",
+        "actions": [
+            {
+                "type": "shell_check",
+                "name": "scan-jwt",
+                "script": "echo '::error file=x.js::demo'\nexit 0",
+            },
+            {"type": "sarif_upload", "category": "blog-jwt-hardening"},
+        ],
+        "configuration": {"continue_on_error": True, "timeout_minutes": 10},
+    }
+    body, _ = _build_ai_job_from_design(design, state=None)
+    parsed = yaml.safe_load(body)
+    step_names = [s.get("name") for s in parsed["steps"]]
+    # Must contain the annotation→SARIF conversion step
+    assert any("annotations to SARIF" in (n or "") for n in step_names), (
+        f"missing annotation-to-SARIF step. Got: {step_names}"
+    )
+    # Must contain the fallback step (ensures SARIF file exists)
+    assert any("fallback" in (n or "") for n in step_names), (
+        f"missing SARIF fallback step. Got: {step_names}"
+    )
+    # Must contain the upload step
+    assert any("Upload" in (n or "") and "Code Scanning" in (n or "") for n in step_names), (
+        f"missing SARIF upload step. Got: {step_names}"
+    )
+    # Find the shell_check step and verify it captures output to the
+    # per-job log file via `tee`.
+    shell_step = next(s for s in parsed["steps"] if s.get("name") == "scan-jwt")
+    # shell_check uses `exec > >(tee -a <log>)` redirection so all
+    # subsequent `::error`/`::warning` lines are captured to a log
+    # file for the SARIF conversion step. This is preferred over a
+    # `{ ... } | tee` wrapper because the wrapper would re-parse the
+    # entire script (breaking single-quoted regex character classes
+    # like `[\"\\']`).
+    assert "exec" in shell_step.get("run", ""), (
+        f"shell_check must use exec redirection, got: {shell_step.get('run')}"
+    )
+    assert "tee" in shell_step.get("run", ""), (
+        f"shell_check exec must include tee, got: {shell_step.get('run')}"
+    )
+    assert "blog-jwt-hardening.shell_log" in shell_step.get("run", ""), (
+        f"shell_check exec must write to per-category log file, got: {shell_step.get('run')}"
+    )
+    # Find the annotation conversion step and verify it parses the
+    # log file with Python (no API call needed).
+    annot_step = next(s for s in parsed["steps"] if "annotations to SARIF" in (s.get("name") or ""))
+    run_text = annot_step.get("run", "")
+    assert "python3" in run_text, f"step must use python3, got: {run_text[:200]}"
+    assert "blog-jwt-hardening.shell_log" in run_text, (
+        f"step must read the per-category log file, got: {run_text[:200]}"
+    )
+    assert "blog-jwt-hardening-results.sarif" in run_text, (
+        f"step must write the per-category SARIF file, got: {run_text[:200]}"
+    )
+
+
+def test_sarif_parser_handles_all_annotation_formats():
+    """Regression: the SARIF conversion step's Python parser must
+    handle the full GitHub Actions annotation format, including
+    `title=` properties and bare `::error::msg` (no `file=`). LLM-
+    generated scripts frequently use `::error title=Foo::msg` and
+    `::error::msg` (no file), and a parser that only accepts
+    `file=...` would silently miss those findings.
+    """
+    import yaml
+    from app.agents.nodes.workflow_generator import _build_ai_job_from_design
+
+    design = {
+        "name": "blog-csp-security-headers",
+        "coverage": "cms_security",
+        "reasoning": "test",
+        "actions": [
+            {"type": "shell_check", "name": "scan-csp", "script": "exit 0"},
+            {"type": "sarif_upload", "category": "blog-csp"},
+        ],
+        "configuration": {"continue_on_error": True, "timeout_minutes": 10},
+    }
+    body, _ = _build_ai_job_from_design(design, state=None)
+    parsed = yaml.safe_load(body)
+    annot_step = next(
+        s for s in parsed["steps"]
+        if "annotations to SARIF" in (s.get("name") or "")
+    )
+    run_text = annot_step.get("run", "")
+
+    # The parser regex must accept these forms (one per line):
+    accepted_forms = [
+        "::error file=src/x.js::msg",                          # file only
+        "::error file=src/x.js,line=33::msg",                  # file + line
+        "::error title=Markdown XSS risk::msg",                # title only (LLM common)
+        "::error title=Foo,file=src/x.js::msg",                # title + file
+        "::error file=src/x.js,title=Title::msg",              # file + title
+        "::error::Bare error",                                 # no properties
+        "::warning file=src/y.js,line=10,endLine=12::msg",     # full props
+    ]
+    rejected_forms = [
+        "::notice file=x.js::msg",   # notice = not a finding
+        "::debug file=x.js::msg",     # debug = not a finding
+        "Just a normal log line",     # plain text
+        "",                            # empty line
+    ]
+
+    # Extract the regex pattern from the generated Python and verify
+    # it matches all accepted forms and rejects all rejected forms.
+    import re
+    pat_match = re.search(
+        r"re\.compile\(\s*r['\"]([^'\"]+)['\"]", run_text
+    )
+    assert pat_match, (
+        f"could not find regex in generated Python:\n{run_text[:500]}"
+    )
+    pat_str = pat_match.group(1)
+    # The generated regex uses Python string `\\s+` etc. Translate
+    # into actual regex syntax for testing.
+    pat = re.compile(pat_str)
+
+    for form in accepted_forms:
+        m = pat.match(form)
+        assert m, (
+            f"parser regex must match {form!r} but did not. "
+            f"Regex: {pat_str!r}"
+        )
+    for form in rejected_forms:
+        m = pat.match(form)
+        assert not m, (
+            f"parser regex must NOT match {form!r} (notice/debug/plain "
+            f"text/empty should be ignored) but it did. "
+            f"Regex: {pat_str!r}"
+        )
