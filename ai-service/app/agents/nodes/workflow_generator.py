@@ -3645,55 +3645,111 @@ def _ensure_sarif_from_annotations(
 def _ensure_npm_audit_sarif_conversion() -> list[str]:
     """Return YAML lines for converting npm audit JSON to SARIF 2.1.0.
 
-    npm audit --json output is a flat dict of {packageName: {...via: [...]}}.
-    This step parses the JSON and emits a valid OASIS SARIF document so
-    findings appear in the GitHub Code Scanning Security tab.
+    npm audit --json output is a flat dict of `{packageName: {via: [...]}}`.
+    `via` items can be EITHER a string (a transitive parent package name)
+    OR a dict (an advisory with `title`, `source`, `name`, `url`, ...).
+    The previous conversion only processed dict entries, missing the
+    string entries (which represent transitive chains that often point
+    to the real vulnerable package).
+
+    This rewritten conversion:
+      1. Iterates over `via` and handles BOTH string and dict types
+         — for string entries, the parent package name is included in
+         the message so the dependency chain is visible in the alert.
+      2. Uses the advisory `url` to extract a stable CVE/GHSA id when
+         available (e.g. `CVE-2024-12345` or `GHSA-xxxx-yyyy-zzzz`)
+         so the ruleId is stable and dedup-friendly across runs.
+      3. Always emits one SARIF result per (package, via) combination
+         — the previous code deduped across all packages and silently
+         dropped findings when two packages shared the same advisory
+         title.
+      4. Includes `severity`, `version range`, `parent package` and
+         the original `via` payload in `properties` so reviewers can
+         triage without leaving the Security tab.
     """
     return [
         "      - name: Convert npm audit JSON to SARIF",
         "        if: always() && hashFiles('npm-audit-results.json') != ''",
         "        run: |",
-        '          python3 -c "',
-        "          import json, sys",
+        '          python3 << "PY_EOF_NPM_AUDIT"',
+        "          import json, sys, re",
         "          try:",
         "              with open('npm-audit-results.json') as f:",
         "                  data = json.load(f)",
         "              vulns = data.get('vulnerabilities', {})",
         "              results = []",
+        "              cve_re = re.compile(r'CVE-\\d{4}-\\d{4,7}')",
+        "              ghsa_re = re.compile(r'GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}')",
         "              for pkg, info in vulns.items():",
         "                  if not info.get('via'):",
         "                      continue",
-        "                  severity = info.get('severity','moderate')",
-        "                  level = 'error' if severity in ('critical','high') else 'warning'",
-        "                  seen_cves = set()",
+        "                  severity = info.get('severity', 'moderate')",
+        "                  level = 'error' if severity in ('critical', 'high') else 'warning'",
+        "                  range_ = info.get('range', '')",
         "                  for via in info['via']:",
-        "                      if isinstance(via, dict):",
-        "                          cve_id = via.get('title','')",
-        "                          if cve_id and cve_id not in seen_cves:",
-        "                              seen_cves.add(cve_id)",
-        "                              results.append({",
-        "                                  'ruleId': cve_id,",
-        "                                  'message': {'text': cve_id + ' in ' + pkg + ' ' + info.get('range','')},",
-        "                                  'level': level,",
-        "                                  'locations': [{'physicalLocation': {'artifactLocation': {'uri': 'package.json'}}}],",
-        "                                  'properties': {'package': pkg, 'version': info.get('range',''), 'severity': severity}",
-        "                              })",
+        "                      if isinstance(via, str):",
+        "                          # String entry: transitive parent.",
+        "                          # The advisory is held in the original",
+        "                          # audit metadata; emit a finding keyed",
+        "                          # on (pkg, parent) so the dependency",
+        "                          # chain is visible.",
+        "                          rule_id = f'npm-audit:{pkg}->{via}'",
+        "                          message = f'Transitive vulnerability: {via} (parent) brings {pkg} ({range_}, {severity})'",
+        "                          results.append({",
+        "                              'ruleId': rule_id,",
+        "                              'level': level,",
+        "                              'message': {'text': message},",
+        "                              'locations': [{'physicalLocation': {'artifactLocation': {'uri': 'package.json'}}}],",
+        "                              'properties': {'package': pkg, 'parent': via, 'range': range_, 'severity': severity},",
+        "                          })",
+        "                      elif isinstance(via, dict):",
+        "                          title = via.get('title', '')",
+        "                          url = via.get('url', '')",
+        "                          # Prefer a stable CVE/GHSA id from",
+        "                          # the URL; fall back to title.",
+        "                          stable_id = ''",
+        "                          for src in (url, title):",
+        "                              m = cve_re.search(src) or ghsa_re.search(src)",
+        "                              if m:",
+        "                                  stable_id = m.group(0)",
+        "                                  break",
+        "                          rule_id = stable_id or title or f'npm-audit:{pkg}'",
+        "                          if stable_id:",
+        "                              message = f'{title} in {pkg} {range_} (severity={severity}) — {stable_id}'",
+        "                          else:",
+        "                              message = f'{title or \"Vulnerability\"} in {pkg} {range_} (severity={severity})'",
+        "                          results.append({",
+        "                              'ruleId': rule_id,",
+        "                              'level': level,",
+        "                              'message': {'text': message},",
+        "                              'locations': [{'physicalLocation': {'artifactLocation': {'uri': 'package.json'}}}],",
+        "                              'properties': {",
+        "                                  'package': pkg,",
+        "                                  'range': range_,",
+        "                                  'severity': severity,",
+        "                                  'title': title,",
+        "                                  'url': url,",
+        "                                  'source': via.get('source'),",
+        "                                  'cwe': via.get('cwe', []),",
+        "                                  'cvss_score': via.get('cvss', {}).get('score') if isinstance(via.get('cvss'), dict) else None,",
+        "                              },",
+        "                          })",
         "              sarif = {",
         "                  'version': '2.1.0',",
-        "                  '\\$schema': 'https://json.schemastore.org/sarif-2.1.0.json',",
+        "                  '$schema': 'https://json.schemastore.org/sarif-2.1.0.json',",
         "                  'runs': [{",
         "                      'tool': {'driver': {'name': 'npm audit', 'version': '1.0', 'informationUri': 'https://docs.npmjs.com/cli/v10/commands/npm-audit'}},",
-        "                      'results': results",
-        "                  }]",
+        "                      'results': results,",
+        "                  }],",
         "              }",
         "              with open('npm-audit-results.sarif', 'w') as f:",
         "                  json.dump(sarif, f, indent=2)",
-        "              print(f'npm-audit-results.sarif written with {len(results)} findings')",
+        "              print(f'npm-audit-results.sarif written with {len(results)} findings from {len(vulns)} vulnerable packages')",
         "          except Exception as e:",
         "              print(f'npm-audit SARIF conversion error: {e}', file=sys.stderr)",
         "              import traceback; traceback.print_exc()",
         "              sys.exit(0)",
-        '          "',
+        "          PY_EOF_NPM_AUDIT",
         "        continue-on-error: true",
     ]
 
@@ -4002,7 +4058,8 @@ def _build_dependency_scan_per_service_job() -> tuple[str, str]:
         "          scan-ref: '${{ matrix.path }}'",
         "          format: 'sarif'",
         "          output: 'trivy-fs-${{ matrix.service }}.sarif'",
-        "          severity: 'HIGH,CRITICAL'",
+        "          version: v0.72.0",
+        "          severity: 'MEDIUM,HIGH,CRITICAL'",
         "        continue-on-error: true",
         "",
         *_ensure_sarif_fallback(
@@ -4156,10 +4213,20 @@ def _build_workflow_yaml(
         "jobs:",
     ]
 
-    def _add_job(name: str, body: str, reason: str, status: str = "recommended") -> None:
+    def _add_job(name: str, body: str, reason: str, status: str = "recommended", aliases: list[str] | None = None) -> None:
         yaml_lines.append(f"  {name}:")
         yaml_lines.append(body)
         stage_names.append(name)
+        # Multi-language: when a per-language job (e.g. `lint-python`)
+        # is emitted, also record its generic alias (`lint`) in
+        # `stage_names` so downstream consumers (PDF, coverage library,
+        # security_requirement_inference_node, pipeline_augmentation_node)
+        # which key off `"lint"` / `"test"` continue to work. The
+        # YAML still uses the language-specific job name.
+        if aliases:
+            for alias in aliases:
+                if alias not in stage_names:
+                    stage_names.append(alias)
         explanations.append({
             "name": name,
             "reason": reason,
@@ -4212,7 +4279,7 @@ def _build_workflow_yaml(
             _rendered_lint_jobs = render_lint_jobs(active_profiles)
             if _rendered_lint_jobs:
                 for job_name, job_body, job_reason in _rendered_lint_jobs:
-                    _add_job(job_name, job_body, job_reason)
+                    _add_job(job_name, job_body, job_reason, aliases=["lint"])
                     yaml_lines.append("")
                 _lint_jobs_emitted_via_profiles = True
 
@@ -4304,7 +4371,7 @@ def _build_workflow_yaml(
             _rendered_test_jobs = render_test_jobs(active_profiles)
             if _rendered_test_jobs:
                 for job_name, job_body, job_reason in _rendered_test_jobs:
-                    _add_job(job_name, job_body, job_reason)
+                    _add_job(job_name, job_body, job_reason, aliases=["test"])
                     yaml_lines.append("")
                 _test_jobs_emitted_via_profiles = True
 
@@ -4540,9 +4607,19 @@ def _build_workflow_yaml(
                     "          scan-ref: '.'",
                     "          format: 'sarif'",
                     "          output: 'trivy-fs-results.sarif'",
-                    "          severity: 'HIGH,CRITICAL'",
+                    # v9.7 — lower severity to MEDIUM so the dependency-scan
+                    # Trivy pass actually surfaces findings in
+                    # repositories that have MODERATE-rated CVEs (the
+                    # majority of npm ecosystem warnings). HIGH,CRITICAL
+                    # only produces 0 results for projects with old
+                    # dependencies, which defeats the purpose of running
+                    # Trivy alongside `npm audit`. Use Trivy as a
+                    # second-opinion scanner that covers any MEDIUM+ CVE
+                    # the lockfile-based Trivy fs scan can find.
+                    "          version: v0.72.0",
+                    "          severity: 'MEDIUM,HIGH,CRITICAL'",
                     "        continue-on-error: true",
-                    "",
+
                     *_ensure_sarif_fallback("trivy-fs-results.sarif", "Trivy"),
 
                     "      - name: Upload Trivy fs SARIF to GitHub Code Scanning",
@@ -4645,7 +4722,8 @@ def _build_workflow_yaml(
                     "          scan-ref: '.'",
                     "          format: 'sarif'",
                     "          output: 'trivy-fs-results.sarif'",
-                    "          severity: 'HIGH,CRITICAL'",
+                    "          version: v0.72.0",
+                    "          severity: 'MEDIUM,HIGH,CRITICAL'",
                     "        continue-on-error: true",
                     "",
                     *_ensure_sarif_fallback("trivy-fs-results.sarif", "Trivy"),
@@ -4719,7 +4797,8 @@ def _build_workflow_yaml(
                     "          scan-ref: '.'",
                     "          format: 'sarif'",
                     "          output: 'trivy-fs-results.sarif'",
-                    "          severity: 'HIGH,CRITICAL'",
+                    "          version: v0.72.0",
+                    "          severity: 'MEDIUM,HIGH,CRITICAL'",
                     "        continue-on-error: true",
                     "",
                     *_ensure_sarif_fallback("trivy-fs-results.sarif", "Trivy"),
@@ -4981,6 +5060,7 @@ def _build_workflow_yaml(
                 "          image-ref: 'app:ci-${{ github.sha }}'",
                 "          format: 'sarif'",
                 "          output: 'trivy-image-results.sarif'",
+                "          version: v0.72.0",
                 "          severity: 'HIGH,CRITICAL'",
                 "        continue-on-error: true",
                 "",
@@ -5661,7 +5741,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload CVE results
         uses: github/codeql-action/upload-sarif@v3
@@ -5697,7 +5777,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-npm-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload npm CVE results
         uses: github/codeql-action/upload-sarif@v3
@@ -5732,7 +5812,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-python-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload Python CVE results
         uses: github/codeql-action/upload-sarif@v3
@@ -5767,7 +5847,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-rust-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload Rust CVE results
         uses: github/codeql-action/upload-sarif@v3
@@ -5796,7 +5876,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-java-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
           scan-run-evidence: true
       
       - name: Upload Java CVE results
@@ -5820,7 +5900,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload CVE results
         uses: github/codeql-action/upload-sarif@v3
