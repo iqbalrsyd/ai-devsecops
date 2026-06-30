@@ -4455,6 +4455,34 @@ def _build_workflow_yaml(
                 if not c.startswith("/src/.semgrep/")
             ]
         except Exception:
+            registry_configs = []
+
+        # Multi-language: enrich `registry_configs` with rulesets keyed
+        # to the detected language(s). This is the only place that
+        # turns the single `sast` job into a per-language-aware scan:
+        # p/python, p/django, p/fastapi for a Python repo;
+        # p/golang for Go; p/csharp for .NET; p/php + p/laravel for
+        # PHP; etc. Monorepos with multiple languages get the union.
+        # If `build_scan_directives` already produced rules for the
+        # same language (e.g. from a custom domain), the dedup block
+        # below keeps the first-seen ordering.
+        try:
+            from app.agents.language_profiles import semgrep_registry_for_languages
+            lang_rules = semgrep_registry_for_languages(
+                primary_language=primary_language,
+                extra_frameworks=frameworks,
+            )
+            for rule in lang_rules:
+                if rule not in registry_configs:
+                    registry_configs.append(rule)
+        except Exception:
+            # Last-ditch fallback: at least the cross-cutting rulesets
+            # so the SAST job is still meaningful for any language.
+            for rule in ("p/owasp-top-ten", "p/secrets", "p/security-audit"):
+                if rule not in registry_configs:
+                    registry_configs.append(rule)
+
+        if not registry_configs:
             registry_configs = [
                 "p/owasp-top-ten",
                 "p/javascript",

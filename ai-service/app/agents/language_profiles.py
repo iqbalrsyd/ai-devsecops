@@ -584,6 +584,140 @@ def list_supported_languages() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Semgrep registry mapping (multi-language SAST)
+# ---------------------------------------------------------------------------
+# Each language maps to a list of Semgrep registry rulesets (the `p/*`
+# shorthand in the Semgrep CLI). The SAST job emits one
+# `--config=<ruleset>` flag per entry. The first entry is the most
+# specific (language / framework); the rest are cross-cutting
+# (OWASP / secrets / supply chain) and deduplicated against whatever
+# domain-specific rules the user already enabled.
+#
+# Reference (verified Jan 2026):
+#   https://semgrep.dev/r  (registry search for "p/<lang>")
+#
+# Note: Semgrep registry tags move occasionally. If a ruleset is
+# renamed upstream, the generator's `semgrep ci` invocation will
+# fail at runtime — fix by updating the entry here.
+
+SEMGREP_REGISTRY_BY_LANGUAGE: dict[str, list[str]] = {
+    "python": [
+        "p/python",
+        "p/django",
+        "p/flask",
+        "p/fastapi",
+        "p/owasp-top-ten",
+        "p/secrets",
+        "p/security-audit",
+    ],
+    "node": [
+        "p/javascript",
+        "p/typescript",
+        "p/nodejs",
+        "p/expressjs",
+        "p/react",
+        "p/owasp-top-ten",
+        "p/secrets",
+        "p/security-audit",
+    ],
+    "go": [
+        "p/golang",
+        "p/owasp-top-ten",
+        "p/secrets",
+        "p/security-audit",
+    ],
+    "java": [
+        "p/java",
+        "p/kotlin",
+        "p/spring",
+        "p/owasp-top-ten",
+        "p/secrets",
+        "p/security-audit",
+    ],
+    "rust": [
+        "p/rust",
+        "p/owasp-top-ten",
+        "p/secrets",
+        "p/security-audit",
+    ],
+    "ruby": [
+        "p/ruby",
+        "p/rails",
+        "p/owasp-top-ten",
+        "p/secrets",
+        "p/security-audit",
+    ],
+    "dotnet": [
+        "p/csharp",
+        "p/dotnet",
+        "p/owasp-top-ten",
+        "p/secrets",
+        "p/security-audit",
+    ],
+    "php": [
+        "p/php",
+        "p/laravel",
+        "p/owasp-top-ten",
+        "p/secrets",
+        "p/security-audit",
+    ],
+}
+
+# Default ruleset when no language can be inferred (or before the
+# new multi-language mapping was wired in). Kept narrow on purpose
+# so the SAST job does not pull the entire registry.
+SEMGREP_REGISTRY_FALLBACK: list[str] = [
+    "p/owasp-top-ten",
+    "p/secrets",
+    "p/security-audit",
+]
+
+
+def semgrep_registry_for_languages(
+    primary_language: str | None,
+    extra_frameworks: list[str] | None = None,
+) -> list[str]:
+    """Build the Semgrep `--config` flag list for one or more languages.
+
+    Resolution order:
+      1. `primary_language` (after alias normalisation)
+      2. First known framework in `extra_frameworks`
+      3. SEMGREP_REGISTRY_FALLBACK (just the cross-cutting rulesets)
+
+    The returned list preserves the per-language ordering (most
+    specific first) and de-duplicates while keeping first-seen order.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _add(rules: list[str]) -> None:
+        for r in rules:
+            if r and r not in seen:
+                seen.add(r)
+                out.append(r)
+
+    # 1. Primary language
+    if primary_language:
+        key = primary_language.lower().strip()
+        canonical = LANGUAGE_ALIASES.get(key, key)
+        if canonical in SEMGREP_REGISTRY_BY_LANGUAGE:
+            _add(SEMGREP_REGISTRY_BY_LANGUAGE[canonical])
+
+    # 2. Each known framework → its host language
+    if extra_frameworks:
+        for fw in extra_frameworks:
+            profile_id = FRAMEWORK_TO_PROFILE.get(fw.lower().strip())
+            if profile_id and profile_id in SEMGREP_REGISTRY_BY_LANGUAGE:
+                _add(SEMGREP_REGISTRY_BY_LANGUAGE[profile_id])
+
+    # 3. Fallback
+    if not out:
+        _add(SEMGREP_REGISTRY_FALLBACK)
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # YAML emission helpers
 # ---------------------------------------------------------------------------
 # These functions return GitHub Actions YAML as a list of string lines.
