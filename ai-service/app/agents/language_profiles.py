@@ -342,7 +342,7 @@ LANGUAGE_PROFILES: dict[str, LanguageProfile] = {
         setup_action="shivammathur/setup-php@v2",
         version_input="php-version",
         default_version="8.2",
-        cache="composer",
+        cache=None,
         linter=LinterSpec(
             install="composer install --prefer-dist --no-progress",
             run="vendor/bin/phpcs --standard=PSR12 app/ || true",
@@ -430,6 +430,10 @@ FRAMEWORK_TO_PROFILE: dict[str, str] = {
     "express": "node",
     "fastify": "node",
     "nestjs": "node",
+    "typescript": "node",
+    "ts": "node",
+    "javascript": "node",
+    "js": "node",
     # Go
     "gin": "go",
     "echo": "go",
@@ -577,3 +581,189 @@ def list_supported_languages() -> list[dict]:
         }
         for p in LANGUAGE_PROFILES.values()
     ]
+
+
+# ---------------------------------------------------------------------------
+# YAML emission helpers
+# ---------------------------------------------------------------------------
+# These functions return GitHub Actions YAML as a list of string lines.
+# The caller is expected to embed them in a job body. The `pin()`
+# function from `action_registry` is used to resolve action refs to
+# verified SHA-pinned forms; we import it lazily inside the helpers so
+# this module stays importable in environments where the action
+# registry has not been initialised yet (e.g. unit tests, CLI tools).
+
+def _get_pinned_action(action_ref: str) -> str:
+    """Resolve an action ref to its pinned SHA form.
+
+    Defers to `action_registry.pin()`; if the action is not in the
+    registry, falls back to the ref as-given so the workflow can still
+    be inspected (a downstream validator will flag the unpinned ref).
+    """
+    try:
+        from app.agents.action_registry import pin
+        return pin(action_ref)
+    except Exception:
+        return action_ref
+
+
+def _format_setup_step(profile: LanguageProfile) -> list[str]:
+    """Render the setup-* step for a profile."""
+    lines = [
+        f"      - name: Set up {profile.label}",
+        f"        uses: {_get_pinned_action(profile.setup_action)}",
+        "        with:",
+        f"          {profile.version_input}: '{profile.default_version}'",
+    ]
+    if profile.cache:
+        lines.append(f"          cache: '{profile.cache}'")
+    return lines
+
+
+def _format_install_step(profile: LanguageProfile) -> list[str]:
+    """Render the dependency install step for a profile (if any)."""
+    if not profile.test or not profile.test.install:
+        return []
+    return [
+        "      - name: Install dependencies",
+        f"        run: {profile.test.install}",
+        "        continue-on-error: true",
+    ]
+
+
+def _format_linter_step(profile: LanguageProfile) -> list[str]:
+    """Render the linter install + run steps for a profile."""
+    if not profile.linter:
+        return []
+    out: list[str] = []
+    if profile.linter.install:
+        out.extend([
+            f"      - name: Install {profile.label} linter",
+            f"        run: {profile.linter.install}",
+            "        continue-on-error: true",
+        ])
+    out.append(
+        f"      - name: Run {profile.label} linter",
+    )
+    out.append(f"        run: {profile.linter.run}")
+    return out
+
+
+def _format_test_step(profile: LanguageProfile) -> list[str]:
+    """Render the test invocation step for a profile."""
+    if not profile.test:
+        return []
+    return [
+        f"      - name: Run {profile.label} tests",
+        f"        run: {profile.test.run}",
+    ]
+
+
+def _format_lint_job(
+    profile: LanguageProfile,
+    pin_fn=None,
+) -> str:
+    """Render a complete `lint-<lang>` job body for a single profile.
+
+    Returns the YAML body (the lines after the job name) as a single
+    string with trailing newline. The caller prepends "  <name>:" and
+    appends the job to the workflow.
+    """
+    setup = _format_setup_step(profile)
+    linter = _format_linter_step(profile)
+
+    steps: list[str] = []
+    steps.extend([
+        "    runs-on: ubuntu-latest",
+        "    timeout-minutes: 15",
+        "    continue-on-error: false",
+        "    steps:",
+        "      - name: Checkout code",
+        f"        uses: {_get_pinned_action('actions/checkout@v4')}",
+        "        with:",
+        "          persist-credentials: false",
+        "",
+    ])
+    steps.extend(setup)
+    if linter:
+        steps.append("")
+        steps.extend(linter)
+    return "\n".join(steps) + "\n"
+
+
+def _format_test_job(
+    profile: LanguageProfile,
+) -> str:
+    """Render a complete `test-<lang>` job body for a single profile."""
+    setup = _format_setup_step(profile)
+    install = _format_install_step(profile)
+    test = _format_test_step(profile)
+
+    steps: list[str] = []
+    steps.extend([
+        "    runs-on: ubuntu-latest",
+        "    timeout-minutes: 15",
+        "    continue-on-error: false",
+        "    steps:",
+        "      - name: Checkout code",
+        f"        uses: {_get_pinned_action('actions/checkout@v4')}",
+        "        with:",
+        "          persist-credentials: false",
+        "",
+    ])
+    steps.extend(setup)
+    if install:
+        steps.append("")
+        steps.extend(install)
+    if test:
+        steps.append("")
+        steps.extend(test)
+    return "\n".join(steps) + "\n"
+
+
+def render_lint_jobs(profiles: list[LanguageProfile]) -> list[tuple[str, str, str]]:
+    """Render a list of `lint-<lang>` jobs for the given profiles.
+
+    Returns a list of (job_name, job_body, reason) tuples ready to be
+    appended to the workflow's jobs section.
+    """
+    out: list[tuple[str, str, str]] = []
+    for p in profiles:
+        if p.linter is None:
+            continue
+        job_name = f"lint-{p.id}"
+        body = _format_lint_job(p)
+        reason = (
+            f"{p.label} detected; runs `{p.linter.run.split('||')[0].strip()}` "
+            f"as a per-language linter. Multi-language monorepos get one "
+            f"`lint-{p.id}` job per detected language."
+        )
+        out.append((job_name, body, reason))
+    return out
+
+
+def render_test_jobs(profiles: list[LanguageProfile]) -> list[tuple[str, str, str]]:
+    """Render a list of `test-<lang>` jobs for the given profiles."""
+    out: list[tuple[str, str, str]] = []
+    for p in profiles:
+        if p.test is None:
+            continue
+        job_name = f"test-{p.id}"
+        body = _format_test_job(p)
+        reason = (
+            f"{p.label} tests; runs `{p.test.run.split('||')[0].strip()}`. "
+            f"Multi-language monorepos get one `test-{p.id}` job per detected "
+            f"language."
+        )
+        out.append((job_name, body, reason))
+    return out
+
+
+def has_tool_specific_sca(profiles: list[LanguageProfile]) -> list[LanguageProfile]:
+    """Return profiles that need a tool-specific SCA job (e.g. pip-audit).
+
+    Profiles with `sca.tool == "trivy"` are handled by the universal
+    `dependency-scan` job and do not need their own SCA job.
+    """
+    return [p for p in profiles if p.sca.tool and p.sca.tool != "trivy"]
+

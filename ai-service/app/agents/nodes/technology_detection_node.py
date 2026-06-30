@@ -8,13 +8,23 @@ from app.utils.json_extractor import extract_json_object
 EXTENSION_MAP = {
     ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript",
     ".jsx": "JavaScript", ".java": "Java", ".go": "Go", ".rs": "Rust",
-    ".rb": "Ruby", ".php": "PHP", ".cs": "C#", ".cpp": "C++", ".c": "C",
-    ".swift": "Swift", ".kt": "Kotlin", ".scala": "Scala", ".r": "R",
-    ".m": "Objective-C", ".h": "C/C++ Header", ".sh": "Shell", ".bash": "Shell",
-    ".yaml": "YAML", ".yml": "YAML", ".json": "JSON", ".xml": "XML",
-    ".html": "HTML", ".css": "CSS", ".scss": "SCSS", ".less": "LESS",
-    ".vue": "Vue", ".svelte": "Svelte", ".astro": "Astro",
+    ".rb": "Ruby", ".php": "PHP", ".cs": "C#", ".csproj": "C#", ".sln": "C#",
+    ".fs": "F#", ".fsproj": "F#", ".vb": "VB.NET", ".vbproj": "VB.NET",
+    ".cpp": "C++", ".c": "C", ".swift": "Swift", ".kt": "Kotlin",
+    ".scala": "Scala", ".r": "R", ".m": "Objective-C", ".h": "C/C++ Header",
+    ".sh": "Shell", ".bash": "Shell", ".yaml": "YAML", ".yml": "YAML",
+    ".json": "JSON", ".xml": "XML", ".html": "HTML", ".css": "CSS",
+    ".scss": "SCSS", ".less": "LESS", ".vue": "Vue", ".svelte": "Svelte",
+    ".astro": "Astro",
     "Dockerfile": "Docker", "Makefile": "Make", "CMakeLists.txt": "CMake",
+    "composer.json": "PHP", "composer.lock": "PHP",
+    "Gemfile": "Ruby", "Gemfile.lock": "Ruby",
+    "Cargo.toml": "Rust", "Cargo.lock": "Rust",
+    "go.mod": "Go", "go.sum": "Go",
+    "pom.xml": "Java", "build.gradle": "Java", "build.gradle.kts": "Java",
+    "requirements.txt": "Python", "pyproject.toml": "Python", "Pipfile": "Python",
+    "package.json": "JavaScript", "yarn.lock": "JavaScript", "pnpm-lock.yaml": "JavaScript",
+    "package-lock.json": "JavaScript",
 }
 
 TECHNOLOGY_DETECTION_PROMPT = """You are a DevSecOps engineer analyzing a GitHub repository.
@@ -31,17 +41,17 @@ Existing workflows:
 {workflows}
 
 Analyze the files and identify:
-- primary_language: the main programming language (e.g. "TypeScript", "Python", "Go", "Java", "Rust")
+- primary_language: the main programming language (e.g. "TypeScript", "Python", "Go", "Java", "Rust", "Ruby", "C#", "PHP")
 - primary_language_confidence: confidence score 0.0-1.0 based on evidence (file counts, build configs)
 - primary_language_reason: brief explanation of why this language was detected
-- frameworks: list of web/app frameworks detected (e.g. ["React", "Express", "Django"])
+- frameworks: list of web/app frameworks detected (e.g. ["React", "Express", "Django", "Laravel", "Rails", "Spring Boot"])
 - framework_confidences: confidence scores for each framework 0.0-1.0
-- build_tools: list of build tools detected (e.g. ["Vite", "npm", "tsc", "webpack"])
-- package_manager: the package manager used (e.g. "npm", "pip", "go mod", "maven")
+- build_tools: list of build tools detected (e.g. ["Vite", "npm", "tsc", "webpack", "composer", "cargo", "maven"])
+- package_manager: the package manager used (e.g. "npm", "pip", "go mod", "maven", "cargo", "bundler", "composer", "nuget")
 - package_manager_confidence: confidence score 0.0-1.0
-- test_framework: the testing framework (e.g. "Vitest", "Jest", "pytest") or null if not detected
+- test_framework: the testing framework (e.g. "Vitest", "Jest", "pytest", "phpunit", "rspec", "xunit", "mstest") or null if not detected
 - database: primary database if detected (e.g. "PostgreSQL", "MongoDB", "Redis") or null
-- runtime: runtime environment if detected (e.g. "Node.js 20", "Python 3.11", "Go 1.22") or null
+- runtime: runtime environment if detected (e.g. "Node.js 20", "Python 3.11", "Go 1.22", "PHP 8.2", "Ruby 3.2", ".NET 8") or null
 
 Return ONLY valid JSON matching this schema. Be precise based on actual files.
 """

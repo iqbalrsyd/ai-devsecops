@@ -334,7 +334,7 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
     # against the upstream action tags before merging. The format is
     # 40-char hex so the registry's `canonical_ref()` validation passes.
     # ------------------------------------------------------------------
-    "actions/setup-go@v5": ActionSpec(
+    "actions/setup-go": ActionSpec(
         owner_repo="actions/setup-go",
         supported_inputs=(
             "go-version", "go-version-file", "check-latest", "token", "cache",
@@ -345,7 +345,7 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         pinned_version="v5.2.0",
         notes="PLACEHOLDER SHA — verify against v5.2.0 release tag before merge. Used for Go toolchain setup.",
     ),
-    "actions/setup-java@v4": ActionSpec(
+    "actions/setup-java": ActionSpec(
         owner_repo="actions/setup-java",
         supported_inputs=(
             "java-version", "java-version-file", "distribution", "java-package",
@@ -357,7 +357,7 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         pinned_version="v4.2.0",
         notes="PLACEHOLDER SHA — verify against v4.2.0 release tag before merge. Used for JVM toolchain setup (Java/Kotlin/Scala).",
     ),
-    "dtolnay/rust-toolchain@stable": ActionSpec(
+    "dtolnay/rust-toolchain": ActionSpec(
         owner_repo="dtolnay/rust-toolchain",
         supported_inputs=(
             "toolchain", "targets", "default", "components", "profile",
@@ -368,7 +368,7 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         pinned_version="stable",
         notes="PLACEHOLDER SHA — verify against `rust-toolchain` `stable` ref before merge. Used for Rust toolchain.",
     ),
-    "actions/setup-ruby@v2": ActionSpec(
+    "actions/setup-ruby": ActionSpec(
         owner_repo="actions/setup-ruby",
         supported_inputs=(
             "ruby-version", "rubygems-version", "bundler-cache", "cache-version",
@@ -379,7 +379,7 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         pinned_version="v2.1.0",
         notes="PLACEHOLDER SHA — verify against v2.1.0 release tag before merge. Used for Ruby/Rails toolchain.",
     ),
-    "actions/setup-dotnet@v4": ActionSpec(
+    "actions/setup-dotnet": ActionSpec(
         owner_repo="actions/setup-dotnet",
         supported_inputs=(
             "dotnet-version", "dotnet-quality", "global-json-file",
@@ -391,7 +391,7 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         pinned_version="v4.0.1",
         notes="PLACEHOLDER SHA — verify against v4.0.1 release tag before merge. Used for .NET SDK setup (C#/F#/VB).",
     ),
-    "shivammathur/setup-php@v2": ActionSpec(
+    "shivammathur/setup-php": ActionSpec(
         owner_repo="shivammathur/setup-php",
         supported_inputs=(
             "php-version", "coverage", "ini-values", "tools", "env",
@@ -403,10 +403,6 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         pinned_sha="b7a8c6d5a3e1f2c4b5a8c6d5a3e1f2c4b5a8c6d5",
         pinned_version="v2.30.0",
         notes="PLACEHOLDER SHA — verify against v2.30.0 release tag before merge. Best-in-class PHP setup action — supports PHP 5.6 through 8.4, Composer, extensions, and coverage tools.",
-    ),
-        node_compatibility=("node24",),
-        pinned_sha="dfe3c3f87815947d99a8997f908cb6525fc44e9e",
-        pinned_version="v4.0.1",
     ),
     "step-security/harden-runner": ActionSpec(
         owner_repo="step-security/harden-runner",

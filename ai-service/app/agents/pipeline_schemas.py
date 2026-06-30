@@ -8,6 +8,17 @@ class GeneratePipelineRequest(BaseModel):
     project_type: str = Field(default="monolithic", description="monolithic only (per R2.1 — arsitektur bukan variabel eksperimen)")
 
 
+class LanguageProfileInfo(BaseModel):
+    """Summary of a single active language profile in the generated pipeline."""
+    id: str = Field(description="Profile id, e.g. 'python', 'node', 'go'")
+    label: str = Field(description="Display label, e.g. 'Python'")
+    default_version: str = Field(description="Default version pinned, e.g. '3.11'")
+    setup_action: str = Field(description="Setup action emitted, e.g. 'actions/setup-python@v5'")
+    has_linter: bool = Field(default=False, description="True if a per-language linter job is emitted")
+    has_test: bool = Field(default=False, description="True if a per-language test job is emitted")
+    sca_tool: str = Field(description="SCA tool, e.g. 'trivy', 'pip-audit', 'npm-audit'")
+
+
 class ValidationResult(BaseModel):
     valid: bool = Field(default=False)
     syntax_ok: bool = Field(default=False)
@@ -26,6 +37,10 @@ class PipelineResponse(BaseModel):
     pr_url: str | None = Field(default=None)
     generation_id: str | None = Field(default=None)
     errors: list[str] = Field(default_factory=list)
+    active_language_profiles: list[LanguageProfileInfo] = Field(
+        default_factory=list,
+        description="Language profiles the generator emitted jobs for. Empty list = language-agnostic repo.",
+    )
 
 
 class DeployRequest(BaseModel):

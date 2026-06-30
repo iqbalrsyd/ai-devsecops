@@ -20,6 +20,13 @@ class PipelineEngineerState(TypedDict):
     detected_deployment: dict | None
     recommended_deployment_target: str | None
 
+    # Multi-language support: list of LanguageProfile.id values that
+    # the workflow generator should emit jobs for. Populated by
+    # `language_profiles.resolve_active_profiles` in
+    # `workflow_generator_node`. Empty list means "language-agnostic
+    # repo" — caller should rely on the universal Trivy fs scan only.
+    active_language_profiles: list[str]
+
     # Tahap 1 (Tambah v9)
     detected_domain: str | None
     domain_sub_type: str | None

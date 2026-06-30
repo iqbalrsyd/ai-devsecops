@@ -427,6 +427,23 @@ def workflow_generator_node(state: PipelineEngineerState) -> PipelineEngineerSta
             print(f"[DEBUG] prerequisite-skipped jobs: {[s['job'] for s in prereq['skipped_jobs']]}")
 
         # Build the workflow deterministically.
+        # ------------------------------------------------------------------
+        # Multi-language: resolve active LanguageProfile list once and
+        # pass it down to `_build_workflow_yaml`. The function still
+        # works without profiles (back-compat: falls back to the
+        # original `has_node` / `has_python` if/elif branches).
+        # ------------------------------------------------------------------
+        from app.agents.language_profiles import (
+            resolve_active_profiles,
+            list_supported_languages,
+        )
+        active_profiles = resolve_active_profiles(technologies)
+        # Stash the list of supported languages for the response payload
+        # so the FE can show "what languages does this generator support"
+        # even if the current repo only uses 1.
+        state["active_language_profiles"] = [p.id for p in active_profiles]
+        state["supported_languages"] = list_supported_languages()
+
         yaml_text, stage_names, explanations = _build_workflow_yaml(
             primary_language=primary_language,
             package_manager=package_manager,
@@ -442,6 +459,7 @@ def workflow_generator_node(state: PipelineEngineerState) -> PipelineEngineerSta
             domain_confidence=state.get("domain_confidence"),
             domain_threats=state.get("domain_threats"),
             state=state,
+            active_profiles=active_profiles,
         )
 
         # Requirement 9: surface any stage that was selected but lacks repository
@@ -1750,6 +1768,14 @@ def _validate_workflow_yaml(
         if not isinstance(job_cfg, dict):
             continue
         if job_name in ALLOWED_STAGES or job_name in ai_allowed:
+            continue
+        # Multi-language: accept `lint-<id>` / `test-<id>` / `dep-scan-<id>`
+        # jobs emitted by `language_profiles.render_*_jobs` for monorepos.
+        if (
+            job_name.startswith("lint-")
+            or job_name.startswith("test-")
+            or job_name.startswith("dep-scan-")
+        ):
             continue
         errors.append(
             f"Job '{job_name}' is not in the allowed stages: {list(ALLOWED_STAGES)}"
@@ -3863,6 +3889,7 @@ def _build_workflow_yaml(
     detected_sub_type: str | None = None,
     llm_rule_suggestions: list[str] | None = None,
     state: PipelineEngineerState | None = None,
+    active_profiles: list | None = None,
 ) -> tuple[str, list[str], list[dict]]:
     """Build the full GitHub Actions workflow YAML deterministically.
 
@@ -3880,6 +3907,13 @@ def _build_workflow_yaml(
         Optional list of custom rule file names suggested by the
         LLM at inference time. Used for emerging threats not yet
         covered by the static mapping in scan_directives.py.
+    active_profiles:
+        Optional list of `LanguageProfile` objects resolved by
+        `language_profiles.resolve_active_profiles`. When non-empty,
+        the `lint` and `test` jobs dispatch over the profile list
+        (one `lint-<id>` / `test-<id>` job per detected language).
+        When empty/None, the original if/elif branches (Node /
+        Python / generic) are used as a backward-compat fallback.
     """
     explanations: list[dict] = []
     stage_names: list[str] = []
@@ -3997,155 +4031,164 @@ def _build_workflow_yaml(
 
     # ---- lint ----
     if "lint" in stages:
-        if has_node:
-            tool = "eslint"
-            reason = (
-                f"JavaScript/TypeScript repository detected"
-                f"{' (package manager: ' + package_manager + ')' if package_manager else ''}"
-                f"; ESLint enforces code-quality and style rules."
-            )
-            # For real CI jobs (lint, test, build) we still need
-            # working modules, so we do NOT use --ignore-scripts.
-            # But native modules with broken V8 builds (e.g.
-            # better-sqlite3@7.4.3 on Node 24) should not block the
-            # whole job — we mark the install step as
-            # `continue-on-error: true` so the actual lint/test/build
-            # step (which is the real check) still runs. If install
-            # fails, the lint step will report it as a missing
-            # dependency rather than a workflow failure.
-            #
-            # Reviewer feedback (round 3): defaulting to Node 24 means
-            # every repo with old native modules (better-sqlite3@7.x,
-            # sqlite3, bcrypt, etc.) ends up with a red CI for the
-            # wrong reason. Auto-detect the Node version from
-            # `engines.node` in package.json (capped at Node 20 LTS)
-            # so `lint` / `test` actually run on real-world repos.
-            node_version = _detect_node_version(structure or [], files or {})
-            setup, install_cmd = _node_setup_steps(
-                package_manager, has_lockfile, node_version=node_version
-            )
-            install = (
-                f"      - name: Install dependencies\n"
-                f"        run: {install_cmd}\n"
-                f"        continue-on-error: true"
-            )
-            run_step = (
-                "      - name: Run ESLint\n        run: |\n"
-                "          if [ -f package.json ] && grep -q '\"lint\"' package.json; then\n"
-                "            npm run lint --if-present\n"
-                "          else\n"
-                "            echo 'No lint script defined; skipping.'\n"
-                "          fi"
-            )
-        elif has_python:
-            tool = "ruff"
-            reason = "Python repository detected; Ruff provides fast linting."
-            setup = [
-                "      - name: Set up Python",
-                f"        uses: {_pin('actions/setup-python@v5')}",
-                "        with:",
-                "          python-version: '3.11'",
-                "",
-            ]
-            install = "      - name: Install Ruff\n        run: pip install ruff"
-            run_step = "      - name: Run Ruff\n        run: ruff check . || true"
-        else:
-            tool = "semgrep"
-            reason = "No specialized linter detected; falling back to Semgrep static checks."
-            setup = []
-            install = ""
-            run_step = (
-                "      - name: Run Semgrep (lint ruleset)\n"
-                f"        uses: {_pin('returntocorp/semgrep-action@v1')}\n"
-                "        with:\n"
-                "          config: >-\n"
-                "            p/owasp-top-ten\n"
-                "            p/javascript\n"
-                "            p/nodejs\n"
-                "            p/expressjs\n"
-                "            p/sql-injection\n"
-                "            p/secrets\n"
-                "            p/dockerfile\n"
-                "        continue-on-error: false"
-            )
+        # Multi-language path: emit one `lint-<id>` job per detected
+        # language profile. Falls through to the legacy if/elif chain
+        # if `active_profiles` is empty (e.g. detection failed or
+        # language has no per-lang linter).
+        _lint_jobs_emitted_via_profiles = False
+        if active_profiles:
+            from app.agents.language_profiles import render_lint_jobs
+            _rendered_lint_jobs = render_lint_jobs(active_profiles)
+            if _rendered_lint_jobs:
+                for job_name, job_body, job_reason in _rendered_lint_jobs:
+                    _add_job(job_name, job_body, job_reason)
+                    yaml_lines.append("")
+                _lint_jobs_emitted_via_profiles = True
 
-        body = "\n".join(
-            [
-                "    runs-on: ubuntu-latest",
-                "    timeout-minutes: 15",
-                "    continue-on-error: false",
-                "    steps:",
-                "      - name: Checkout code",
-                f"        uses: {_pin('actions/checkout@v4')}",
-                "        with:",
-                "          persist-credentials: false",
-                "",
-                *setup,
-                *( [install, ""] if install else [] ),
-                run_step,
-            ]
-        )
-        _add_job("lint", body, reason)
-        yaml_lines.append("")  # blank line after job
+        if not _lint_jobs_emitted_via_profiles:
+            # Legacy fallback: single `lint` job from if/elif below.
+            if has_node:
+                tool = "eslint"
+                reason = (
+                    f"JavaScript/TypeScript repository detected"
+                    f"{' (package manager: ' + package_manager + ')' if package_manager else ''}"
+                    f"; ESLint enforces code-quality and style rules."
+                )
+                node_version = _detect_node_version(structure or [], files or {})
+                setup, install_cmd = _node_setup_steps(
+                    package_manager, has_lockfile, node_version=node_version
+                )
+                install = (
+                    f"      - name: Install dependencies\n"
+                    f"        run: {install_cmd}\n"
+                    f"        continue-on-error: true"
+                )
+                run_step = (
+                    "      - name: Run ESLint\n        run: |\n"
+                    "          if [ -f package.json ] && grep -q '\"lint\"' package.json; then\n"
+                    "            npm run lint --if-present\n"
+                    "          else\n"
+                    "            echo 'No lint script defined; skipping.'\n"
+                    "          fi"
+                )
+            elif has_python:
+                tool = "ruff"
+                reason = "Python repository detected; Ruff provides fast linting."
+                setup = [
+                    "      - name: Set up Python",
+                    f"        uses: {_pin('actions/setup-python@v5')}",
+                    "        with:",
+                    "          python-version: '3.11'",
+                    "",
+                ]
+                install = "      - name: Install Ruff\n        run: pip install ruff"
+                run_step = "      - name: Run Ruff\n        run: ruff check . || true"
+            else:
+                tool = "semgrep"
+                reason = "No specialized linter detected; falling back to Semgrep static checks."
+                setup = []
+                install = ""
+                run_step = (
+                    "      - name: Run Semgrep (lint ruleset)\n"
+                    f"        uses: {_pin('returntocorp/semgrep-action@v1')}\n"
+                    "        with:\n"
+                    "          config: >-\n"
+                    "            p/owasp-top-ten\n"
+                    "            p/javascript\n"
+                    "            p/nodejs\n"
+                    "            p/expressjs\n"
+                    "            p/sql-injection\n"
+                    "            p/secrets\n"
+                    "            p/dockerfile\n"
+                    "        continue-on-error: false"
+                )
+
+            body = "\n".join(
+                [
+                    "    runs-on: ubuntu-latest",
+                    "    timeout-minutes: 15",
+                    "    continue-on-error: false",
+                    "    steps:",
+                    "      - name: Checkout code",
+                    f"        uses: {_pin('actions/checkout@v4')}",
+                    "        with:",
+                    "          persist-credentials: false",
+                    "",
+                    *setup,
+                    *( [install, ""] if install else [] ),
+                    run_step,
+                ]
+            )
+            _add_job("lint", body, reason)
+            yaml_lines.append("")
 
     # ---- test ----
     if "test" in stages and test_framework:
-        if has_node:
-            tool = "npm test"
-            reason = f"Test framework '{test_framework}' detected; run unit tests before security scans."
-            # Real CI job — install must not block the whole job
-            # on a broken native module build.
-            #
-            # Use the same Node version detection as `lint` so both
-            # jobs install with a runtime that can actually build
-            # the repo's native modules.
-            node_version = _detect_node_version(structure or [], files or {})
-            setup, install_cmd = _node_setup_steps(
-                package_manager, has_lockfile, node_version=node_version
-            )
-            install = (
-                f"      - name: Install dependencies\n"
-                f"        run: {install_cmd}\n"
-                f"        continue-on-error: true"
-            )
-            run_step = "      - name: Run tests\n        run: npm test --if-present || true"
-        elif has_python:
-            tool = "pytest"
-            reason = f"Test framework '{test_framework}' detected; run Python tests before security scans."
-            setup = [
-                "      - name: Set up Python",
-                f"        uses: {_pin('actions/setup-python@v5')}",
-                "        with:",
-                "          python-version: '3.11'",
-                "",
-            ]
-            install = "      - name: Install dependencies\n        run: pip install -r requirements.txt || pip install -e . || true"
-            run_step = "      - name: Run tests\n        run: pytest || python -m pytest || true"
-        else:
-            tool = test_framework or "test"
-            reason = f"Test framework '{test_framework}' detected."
-            setup = []
-            install = ""
-            run_step = f"      - name: Run {test_framework}\n        run: echo 'Test execution for {test_framework}'"
+        # Multi-language path: emit one `test-<id>` job per detected
+        # language profile. Falls through to the legacy if/elif chain
+        # if `active_profiles` is empty.
+        _test_jobs_emitted_via_profiles = False
+        if active_profiles:
+            from app.agents.language_profiles import render_test_jobs
+            _rendered_test_jobs = render_test_jobs(active_profiles)
+            if _rendered_test_jobs:
+                for job_name, job_body, job_reason in _rendered_test_jobs:
+                    _add_job(job_name, job_body, job_reason)
+                    yaml_lines.append("")
+                _test_jobs_emitted_via_profiles = True
 
-        body = "\n".join(
-            [
-                "    runs-on: ubuntu-latest",
-                "    timeout-minutes: 15",
-                "    continue-on-error: false",
-                "    steps:",
-                "      - name: Checkout code",
-                f"        uses: {_pin('actions/checkout@v4')}",
-                "        with:",
-                "          persist-credentials: false",
-                "",
-                *setup,
-                *( [install, ""] if install else [] ),
-                run_step,
-            ]
-        )
-        _add_job("test", body, reason)
-        yaml_lines.append("")
+        if not _test_jobs_emitted_via_profiles:
+            # Legacy fallback: single `test` job from if/elif below.
+            if has_node:
+                tool = "npm test"
+                reason = f"Test framework '{test_framework}' detected; run unit tests before security scans."
+                node_version = _detect_node_version(structure or [], files or {})
+                setup, install_cmd = _node_setup_steps(
+                    package_manager, has_lockfile, node_version=node_version
+                )
+                install = (
+                    f"      - name: Install dependencies\n"
+                    f"        run: {install_cmd}\n"
+                    f"        continue-on-error: true"
+                )
+                run_step = "      - name: Run tests\n        run: npm test --if-present || true"
+            elif has_python:
+                tool = "pytest"
+                reason = f"Test framework '{test_framework}' detected; run Python tests before security scans."
+                setup = [
+                    "      - name: Set up Python",
+                    f"        uses: {_pin('actions/setup-python@v5')}",
+                    "        with:",
+                    "          python-version: '3.11'",
+                    "",
+                ]
+                install = "      - name: Install dependencies\n        run: pip install -r requirements.txt || pip install -e . || true"
+                run_step = "      - name: Run tests\n        run: pytest || python -m pytest || true"
+            else:
+                tool = test_framework or "test"
+                reason = f"Test framework '{test_framework}' detected."
+                setup = []
+                install = ""
+                run_step = f"      - name: Run {test_framework}\n        run: echo 'Test execution for {test_framework}'"
+
+            body = "\n".join(
+                [
+                    "    runs-on: ubuntu-latest",
+                    "    timeout-minutes: 15",
+                    "    continue-on-error: false",
+                    "    steps:",
+                    "      - name: Checkout code",
+                    f"        uses: {_pin('actions/checkout@v4')}",
+                    "        with:",
+                    "          persist-credentials: false",
+                    "",
+                    *setup,
+                    *( [install, ""] if install else [] ),
+                    run_step,
+                ]
+            )
+            _add_job("test", body, reason)
+            yaml_lines.append("")
 
     # ---- sast ----
     if "sast" in stages:
