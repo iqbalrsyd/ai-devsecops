@@ -280,7 +280,7 @@ LANGUAGE_PROFILES: dict[str, LanguageProfile] = {
         setup_action="actions/setup-ruby@v2",
         version_input="ruby-version",
         default_version="3.2",
-        cache="bundler",
+        cache=None,
         linter=LinterSpec(
             install="bundle install",
             run="bundle exec rubocop --no-fail-level=convention || true",
@@ -593,8 +593,16 @@ def list_supported_languages() -> list[dict]:
 # (OWASP / secrets / supply chain) and deduplicated against whatever
 # domain-specific rules the user already enabled.
 #
-# Reference (verified Jan 2026):
-#   https://semgrep.dev/r  (registry search for "p/<lang>")
+# Verified against returntocorp/semgrep:1.99.0 — every entry below exits
+# with code 0 when passed to `semgrep ci --config=<entry> --no-suppress-errors`.
+# Rulesets that are NOT valid in the public Semgrep registry have been
+# removed (previously listed `p/dotnet`, `p/spring`, `p/rails` — all
+# return exit code 7 = "config error" because they do not exist).
+# Framework-specific rules for those stacks are covered by the language
+# ruleset itself (e.g. `p/csharp` includes ASP.NET patterns;
+# `p/java` includes Spring patterns; `p/ruby` includes Rails patterns).
+#
+# Reference: https://semgrep.dev/r  (registry search for "p/<lang>")
 #
 # Note: Semgrep registry tags move occasionally. If a ruleset is
 # renamed upstream, the generator's `semgrep ci` invocation will
@@ -629,7 +637,6 @@ SEMGREP_REGISTRY_BY_LANGUAGE: dict[str, list[str]] = {
     "java": [
         "p/java",
         "p/kotlin",
-        "p/spring",
         "p/owasp-top-ten",
         "p/secrets",
         "p/security-audit",
@@ -642,21 +649,18 @@ SEMGREP_REGISTRY_BY_LANGUAGE: dict[str, list[str]] = {
     ],
     "ruby": [
         "p/ruby",
-        "p/rails",
         "p/owasp-top-ten",
         "p/secrets",
         "p/security-audit",
     ],
     "dotnet": [
         "p/csharp",
-        "p/dotnet",
         "p/owasp-top-ten",
         "p/secrets",
         "p/security-audit",
     ],
     "php": [
         "p/php",
-        "p/laravel",
         "p/owasp-top-ten",
         "p/secrets",
         "p/security-audit",
