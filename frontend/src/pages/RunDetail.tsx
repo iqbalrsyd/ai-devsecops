@@ -5,13 +5,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { useRunDetail, useRunAnalysis, useJobLogFindings, useRunRawLog, useGeneratePdf } from "@/hooks/usePipelinesV2"
-import { usePipelineAnalyze, useNodeSpecs, useRepoPipeline, usePerVulnRecommendation, type RepoPipelineResult } from "@/hooks/usePipeline"
+import { usePipelineAnalyze, useNodeSpecs, useRepoPipeline, useRepoPipelineSummary, usePerVulnRecommendation, type RepoPipelineResult } from "@/hooks/usePipeline"
 import { useProjects } from "@/hooks/useProjects"
 import { useRepositoryDetail } from "@/hooks/useRepositories"
 import Header from "@/components/Header"
 import NodeSpecCard from "@/components/NodeSpecCard"
+import { renderMarkdown } from "@/components/MarkdownText"
 import type { PipelineJob, JobStep, Finding } from "@/hooks/usePipelinesV2"
-import { Clock, ExternalLink, Loader2, CheckCircle2, XCircle, AlertTriangle, ChevronDown, ChevronRight, FileWarning, Shield, RefreshCw, FileText, Layers, Sparkles } from "lucide-react"
+import { Clock, ExternalLink, Loader2, CheckCircle2, XCircle, AlertTriangle, ChevronDown, ChevronRight, FileWarning, Shield, RefreshCw, FileText, Layers, Sparkles, Bot, Terminal, ArrowRight, Copy } from "lucide-react"
 
 function safeJsonParse<T>(val: unknown, fallback: T): T {
   if (val == null || val === "" || val === "null") return fallback
@@ -673,6 +674,132 @@ function severityToLabel(severity: string | undefined | null): {
   return { label: "NOTE", classes: "bg-blue-100 text-blue-800 border-blue-300" }
 }
 
+// RecommendationPanel renders the AI-generated fix for a
+// single Code Scanning alert. The backend returns
+// `{ recommendation, code_changes[] }`; this component turns
+// that into something that looks like a real AI assistant
+// response (markdown body + side-by-side diff blocks + a
+// copy-to-clipboard action).
+//
+// The backend may occasionally return an empty
+// `recommendation` string when the LLM call failed and the
+// deterministic fallback was empty too — in that case we
+// surface a polite empty state so the user is not staring at
+// a blank card.
+function RecommendationPanel({
+  rec,
+}: {
+  rec: import("@/hooks/usePipeline").PerVulnRecommendationResult
+}) {
+  const [copied, setCopied] = useState(false)
+  const body = (rec.recommendation || "").trim()
+  const changes = Array.isArray(rec.code_changes) ? rec.code_changes : []
+  // Only show the diff section when at least one entry has
+  // actual `before`/`after` content. The BE sometimes
+  // returns a placeholder `code_changes: [{}]` for findings
+  // that have no concrete snippet — render an empty
+  // placeholder block in that case.
+  const usableChanges = changes.filter(
+    (c) => (c.before && c.before.trim()) || (c.after && c.after.trim()),
+  )
+  const handleCopy = async () => {
+    const text = [
+      body,
+      ...changes
+        .map((c, i) => {
+          const header = c.description ? `# Change ${i + 1}: ${c.description}\n` : ""
+          const before = c.before ? `- ${c.before}\n` : ""
+          const after = c.after ? `+ ${c.after}\n` : ""
+          return header + before + after
+        })
+        .filter(Boolean),
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard may be unavailable in some browsers; ignore.
+    }
+  }
+  return (
+    <div className="rounded-md border border-purple-200 bg-gradient-to-br from-purple-50/60 to-white">
+      <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-purple-100">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-purple-800">
+          <Bot className="h-3.5 w-3.5" />
+          AI-generated fix
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleCopy()}
+          className="inline-flex items-center gap-1 text-[10px] text-gray-500 hover:text-purple-700 transition-colors"
+          title="Copy the recommendation to clipboard"
+        >
+          {copied ? (
+            <CheckCircle2 className="h-3 w-3 text-green-600" />
+          ) : (
+            <Copy className="h-3 w-3" />
+          )}
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <div className="px-3 py-2.5 text-xs">
+        {body ? (
+          <div className="space-y-1.5">{renderMarkdown(body)}</div>
+        ) : (
+          <p className="text-gray-500 italic">
+            The AI did not return a textual recommendation for this
+            finding. Inspect the suggested code change below, or open
+            the rule documentation on GitHub for guidance.
+          </p>
+        )}
+        {usableChanges.length > 0 && (
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center gap-1 text-[10px] font-semibold text-gray-600 uppercase tracking-wide">
+              <Terminal className="h-3 w-3" />
+              Suggested changes ({usableChanges.length})
+            </div>
+            {usableChanges.map((cc, idx) => (
+              <div
+                key={idx}
+                className="rounded-md border border-gray-200 bg-white overflow-hidden"
+              >
+                {cc.description && (
+                  <div className="px-2.5 py-1 text-[11px] text-gray-700 border-b border-gray-100 bg-gray-50">
+                    {cc.description}
+                  </div>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100">
+                  <div className="bg-red-50/40">
+                    <div className="px-2 py-0.5 text-[10px] font-mono text-red-700 border-b border-red-100">
+                      before
+                    </div>
+                    <pre className="text-[11px] text-red-900 px-2 py-1.5 overflow-x-auto font-mono whitespace-pre">
+                      <code>{cc.before || "(no original)"}</code>
+                    </pre>
+                  </div>
+                  <div className="bg-green-50/40">
+                    <div className="px-2 py-0.5 text-[10px] font-mono text-green-700 border-b border-green-100 flex items-center gap-1">
+                      <ArrowRight className="h-2.5 w-2.5" />
+                      after
+                    </div>
+                    <pre className="text-[11px] text-green-900 px-2 py-1.5 overflow-x-auto font-mono whitespace-pre">
+                      <code>{cc.after || "(no replacement)"}</code>
+                    </pre>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function CodeScanningAlertsCard({
   alerts,
   repositoryFullName,
@@ -702,8 +829,16 @@ function CodeScanningAlertsCard({
   ) => {
     const key = `${alert.rule_id ?? ""}::${alert.file_location ?? ""}::${alert.line ?? ""}`
     if (!repositoryFullName || !alert.rule_id) return
-    if (recByKey[key]?.recommendation) return // already fetched
-    setRecByKey((prev) => ({ ...prev, [key]: { loading: true } }))
+    // Don't refetch while a request is already in flight for
+    // this alert. The "Regenerate" button intentionally
+    // bypasses the cache (we *want* the user to be able to
+    // re-run the LLM), so we only short-circuit on `loading`,
+    // not on a previously-fetched `recommendation`.
+    if (recByKey[key]?.loading) return
+    setRecByKey((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], loading: true, error: undefined },
+    }))
     try {
       const result = await recommendMutation.mutateAsync({
         repository_full_name: repositoryFullName,
@@ -779,6 +914,34 @@ function CodeScanningAlertsCard({
             Code Scanning Alerts ({sorted.length})
           </CardTitle>
           <div className="flex items-center gap-2 text-xs">
+            {sorted.length > 0 && totalCvss > 0 && (() => {
+              // Headline band palette mirrors the "Total CVSS
+              // Score" card on the dashboard. Thresholds:
+              //   total > 100 → critical (red)
+              //   total >  50 → high     (orange)
+              //   total >  25 → medium   (amber)
+              //   else         → low      (green)
+              const band =
+                totalCvss > 100 ? "critical"
+                : totalCvss > 50 ? "high"
+                : totalCvss > 25 ? "medium"
+                : "low"
+              const palette: Record<string, string> = {
+                critical: "bg-red-200 text-red-900 border-red-400",
+                high: "bg-red-100 text-red-800 border-red-300",
+                medium: "bg-amber-100 text-amber-800 border-amber-300",
+                low: "bg-green-100 text-green-800 border-green-300",
+              }
+              const label = band.toUpperCase()
+              return (
+                <span
+                  className={`px-2 py-0.5 rounded font-mono font-semibold border ${palette[band]}`}
+                  title={`Total CVSS v3.1 sum across all findings — ${label} band`}
+                >
+                  Total CVSS {fmtSum(totalCvss)} · {label}
+                </span>
+              )
+            })()}
             {cvssByBand.critical.count > 0 && (
               <span className="px-2 py-0.5 rounded bg-red-100 text-red-800 border border-red-300 font-mono">
                 {cvssByBand.critical.count} critical · CVSS {fmtSum(cvssByBand.critical.sum)}
@@ -797,11 +960,6 @@ function CodeScanningAlertsCard({
             {cvssByBand.low.count > 0 && (
               <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-300 font-mono">
                 {cvssByBand.low.count} low · CVSS {fmtSum(cvssByBand.low.sum)}
-              </span>
-            )}
-            {sorted.length > 0 && (
-              <span className="px-2 py-0.5 rounded bg-gray-900 text-white border border-gray-700 font-mono">
-                Total CVSS {fmtSum(totalCvss)}
               </span>
             )}
           </div>
@@ -998,45 +1156,22 @@ function CodeScanningAlertsCard({
                         <p className="text-red-600 italic">
                           Failed to generate: {rec.error}
                         </p>
-                      ) : rec?.recommendation ? (
-                        <div className="space-y-2">
-                          <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">
-                            {rec.recommendation.recommendation}
-                          </p>
-                          {rec.recommendation.code_changes &&
-                            rec.recommendation.code_changes.length > 0 && (
-                              <div className="space-y-2">
-                                {rec.recommendation.code_changes.map(
-                                  (cc, idx) => (
-                                    <div
-                                      key={idx}
-                                      className="border border-gray-200 rounded p-2 bg-gray-50"
-                                    >
-                                      {cc.description && (
-                                        <div className="text-[11px] text-gray-600 mb-1">
-                                          {cc.description}
-                                        </div>
-                                      )}
-                                      {cc.before && (
-                                        <pre className="text-[10px] bg-red-50 border border-red-200 rounded p-1 overflow-x-auto mb-1">
-                                          <code>- {cc.before}</code>
-                                        </pre>
-                                      )}
-                                      {cc.after && (
-                                        <pre className="text-[10px] bg-green-50 border border-green-200 rounded p-1 overflow-x-auto">
-                                          <code>+ {cc.after}</code>
-                                        </pre>
-                                      )}
-                                    </div>
-                                  ),
-                                )}
-                              </div>
-                            )}
+                      ) : rec?.loading && !rec?.recommendation ? (
+                        <div className="rounded-md border border-purple-200 bg-purple-50/30 px-3 py-3 space-y-2 animate-pulse">
+                          <div className="flex items-center gap-2 text-[11px] font-semibold text-purple-800">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Generating recommendation…
+                          </div>
+                          <div className="h-2 bg-purple-100 rounded w-11/12" />
+                          <div className="h-2 bg-purple-100 rounded w-9/12" />
+                          <div className="h-2 bg-purple-100 rounded w-10/12" />
                         </div>
+                      ) : rec?.recommendation ? (
+                        <RecommendationPanel rec={rec.recommendation} />
                       ) : fixText ? (
-                        <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">
-                          {fixText}
-                        </p>
+                        <div className="text-gray-700 text-xs leading-relaxed border border-gray-200 rounded-md bg-gray-50 px-3 py-2">
+                          {renderMarkdown(fixText)}
+                        </div>
                       ) : (
                         <p className="text-gray-400 italic">
                           No recommendation available yet. Click{" "}
@@ -1094,6 +1229,12 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
   const repoPipelineMutation = useRepoPipeline()
   const [pipelineResult, setPipelineResult] = useState<RepoPipelineResult | null>(null)
   const [pipelineLoading, setPipelineLoading] = useState(false)
+  // Bab 5.13.5: Go-side fallback. The Go backend persists
+  // Tahap-1 / Tahap-2 detection (technologies, architecture,
+  // deployment) on `repository_insights` — we pull it as a
+  // last-resort fallback when the AI service is slow or down
+  // so the PDF cover page is never blank.
+  const { data: pipelineSummary } = useRepoPipelineSummary(repoId)
   // The most recent AI response (with log-derived findings) is
   // held in this state so the Security Findings table can render
   // it immediately without waiting for a Go-side re-sync.
@@ -1111,30 +1252,71 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
   // workflow YAML. The AI service is the source of truth for
   // all of these — the Go backend's `PipelineRun` schema
   // does not carry them.
+  //
+  // The call can be slow (>30s) because the AI service runs
+  // an LLM call for the coverage inference. The user can
+  // also click "Fetch Pipeline" below to retry manually.
+  const fetchPipelineData = async (): Promise<RepoPipelineResult | null> => {
+    if (!repo?.full_name) {
+      console.warn("[RunDetail] fetchPipelineData: repo.full_name not loaded yet")
+      return null
+    }
+    setPipelineLoading(true)
+    try {
+      // Pass the cached GitHub token so the AI service can
+      // talk to the GitHub API for private repos.
+      const cachedToken =
+        (typeof window !== "undefined" && localStorage.getItem("github_token")) || ""
+      const result = await repoPipelineMutation.mutateAsync({
+        repository_full_name: repo.full_name,
+        github_token: cachedToken,
+      })
+      setPipelineResult(result)
+      console.log("[pipeline] result:", {
+        repo: repo.full_name,
+        detected_technologies: result?.detected_technologies,
+        detected_architecture: result?.detected_architecture,
+        detected_architecture_type: result?.detected_architecture_type,
+        detected_deployment: result?.detected_deployment,
+        recommended_deployment_target: result?.recommended_deployment_target,
+        detected_domain: result?.detected_domain,
+        domain_sub_type: result?.domain_sub_type,
+        security_coverages_count: result?.security_coverages?.length ?? 0,
+        pipeline_augmentations_count: result?.pipeline_augmentations?.length ?? 0,
+        generated_stages_count: result?.generated_stages?.length ?? 0,
+        has_generated_workflow: !!result?.generated_workflow,
+        pipeline_version: result?.pipeline_version,
+        errors: result?.errors,
+      })
+      return result
+    } catch (e) {
+      console.warn("[RunDetail] failed to fetch pipeline data:", e)
+      // Bab 5.13.5: if the AI service is unreachable, fall
+      // back to the Go-side `repository_insights` summary so
+      // the PDF cover page still has architecture /
+      // technologies / deployment data.
+      if (pipelineSummary?.has_insight) {
+        console.log(
+          "[RunDetail] AI service failed; using Go-side pipeline-summary fallback",
+        )
+        const fallback = pipelineSummary as RepoPipelineResult
+        setPipelineResult(fallback)
+        return fallback
+      }
+      return null
+    } finally {
+      setPipelineLoading(false)
+    }
+  }
+
   useEffect(() => {
     let cancelled = false
-    const fetchPipeline = async () => {
-      if (!repo?.full_name || pipelineResult || pipelineLoading) return
-      setPipelineLoading(true)
-      try {
-        const result = await repoPipelineMutation.mutateAsync({
-          repository_full_name: repo.full_name,
-        })
-        if (!cancelled) {
-          setPipelineResult(result)
-        }
-      } catch (e) {
-        // Silently fall back: the PDF will simply show
-        // placeholders for the missing fields. The user can
-        // still see all 52 findings, the CVSS breakdown,
-        // and the per-finding table — those come from the
-        // analyzer, not the pipeline.
-        console.warn("[RunDetail] failed to fetch pipeline data:", e)
-      } finally {
-        if (!cancelled) setPipelineLoading(false)
-      }
-    }
-    void fetchPipeline()
+    void (async () => {
+      if (!repo?.full_name || pipelineResult) return
+      const result = await fetchPipelineData()
+      if (cancelled) return
+      if (result) setPipelineResult(result)
+    })()
     return () => {
       cancelled = true
     }
@@ -1333,6 +1515,23 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
     }
     const repoFullName = repo.full_name
     setPdfMsg(null)
+    // Bab 5.13.5: if the on-mount pipeline fetch is still in
+    // flight (or never returned data) the PDF body will be
+    // empty. Trigger one more fetch *now* and wait for it so
+    // the cover page, Section 1, Section 2, Section 5 all have
+    // data. We cap the wait at 60s — if the AI service is
+    // unreachable the user gets the synthetic fallback below
+    // instead of an empty PDF.
+    if (!pipelineResult) {
+      setPdfMsg("Fetching pipeline data (this may take up to 60s)…")
+      const result = await fetchPipelineData()
+      if (!result) {
+        console.warn(
+          "[RunDetail] PDF: pipeline fetch did not return data; " +
+            "falling back to analysis + synthetic defaults",
+        )
+      }
+    }
     try {
       // Prefer the live analysis (the one captured when the
       // user clicked Refresh Analysis) over the saved one, so
@@ -1373,31 +1572,65 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
       // from `POST /ai/pipeline/repo/pipeline`, which we
       // fetched on mount into `pipelineResult`. We try the
       // analysis first, then the pipeline result, then the
-      // run, then fall back to a sensible default so the
-      // PDF never reads "—".
+      // run, then the Go-side `pipelineSummary` (cached on
+      // `repository_insights`), then fall back to a sensible
+      // default so the PDF never reads "—".
       const detectedTechnologies =
         (analysis as any)?.analysis?.technologies ??
         (analysis as any)?.detected_technologies ??
+        (analysis as any)?.technologies ??
         pipelineResult?.detected_technologies ??
-        (run as any).detected_technologies ?? {}
+        pipelineResult?.technologies ??
+        (run as any).detected_technologies ??
+        (run as any).technologies ??
+        pipelineSummary?.detected_technologies ??
+        pipelineSummary?.technologies ?? {}
       const detectedArchitecture =
         (analysis as any)?.analysis?.architecture ??
         (analysis as any)?.detected_architecture ??
-        pipelineResult?.detected_architecture ??
-        (run as any).detected_architecture ?? {}
+        // v9.5: the BE `_build_pipeline_response` now returns both
+        // `detected_architecture` (dict) and `architecture` (string) +
+        // `architecture_detail` (dict). The old path
+        // (string `architecture` only) used to make the cover page
+        // show "[object Object]" — guard against that here.
+        (() => {
+          const a = pipelineResult?.detected_architecture
+          if (a && typeof a === "object") return a
+          if (typeof a === "string") return { architecture_type: a }
+          const detail = pipelineResult?.architecture_detail
+          if (detail && typeof detail === "object") {
+            return {
+              ...(detail as Record<string, unknown>),
+              architecture_type:
+                (detail as { architecture_type?: string }).architecture_type ??
+                pipelineResult?.architecture ??
+                "monolithic",
+            }
+          }
+          if (typeof pipelineResult?.architecture === "string") {
+            return { architecture_type: pipelineResult.architecture }
+          }
+          return {}
+        })() ??
+        (run as any).detected_architecture ??
+        pipelineSummary?.detected_architecture ??
+        pipelineSummary?.architecture_detail ?? {}
       const detectedDeployment =
         (analysis as any)?.analysis?.deployment ??
         (analysis as any)?.detected_deployment ??
+        (analysis as any)?.deployment ??
         pipelineResult?.detected_deployment ??
-        (run as any).detected_deployment ?? {}
+        (run as any).detected_deployment ??
+        pipelineSummary?.detected_deployment ?? {}
       const detectedDomain =
         (analysis as any)?.analysis?.domain ??
         (analysis as any)?.detected_domain ??
         pipelineResult?.detected_domain ??
         (run as any).detected_domain ??
+        pipelineSummary?.detected_domain ??
         "general"
       const pipelineAnalysis = (analysis as any)?.analysis ??
-        pipelineResult ?? (run as any)
+        pipelineResult ?? (run as any) ?? pipelineSummary
       const detectedArchitectureType =
         pipelineAnalysis?.detected_architecture_type ??
         pipelineAnalysis?.architecture?.architecture_type ??
@@ -1437,26 +1670,94 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
       const jobDesigns =
         (analysis as any)?.job_designs ??
         pipelineResult?.job_designs ?? []
+      const llmGeneratedRules =
+        (analysis as any)?.llm_generated_rules ??
+        pipelineResult?.llm_generated_rules ?? []
+      // Bab 5.13.5: synthetic fallback. If the AI service is
+      // unreachable AND the Go-side analysis has no detected
+      // fields, build a minimal-but-meaningful payload from
+      // the repository's GitHub language so the PDF cover
+      // page is never "Architecture: — | Domain: —".
+      const isEmpty = (v: unknown): boolean =>
+        v == null ||
+        (typeof v === "object" && Object.keys(v as object).length === 0) ||
+        (Array.isArray(v) && v.length === 0)
+      const isEmptyState =
+        isEmpty(detectedTechnologies) &&
+        isEmpty(detectedArchitecture) &&
+        isEmpty(securityCoverages) &&
+        isEmpty(generatedStages)
+      let finalDetectedTechnologies = detectedTechnologies
+      let finalDetectedArchitecture = detectedArchitecture
+      let finalDetectedDeployment = detectedDeployment
+      let finalDetectedDomain = detectedDomain
+      let finalDetectedArchitectureType = detectedArchitectureType
+      let finalRecommendedDeploymentTarget = recommendedDeploymentTarget
+      let finalSecurityCoverages = securityCoverages
+      let finalPipelineAugmentations = pipelineAugmentations
+      let finalGeneratedStages = generatedStages
+      let syntheticNote: string | null = null
+      if (isEmptyState) {
+        // Derive a primary language from the repo.language
+        // field exposed by the Go backend. Fall back to
+        // the simple substring match on the repo name as a
+        // last resort.
+        const repoLang =
+          (repo as { language?: string })?.language ||
+          (repoFullName.includes("eccomerce") || repoFullName.includes("ecommerce")
+            ? "JavaScript"
+            : "JavaScript")
+        finalDetectedTechnologies = {
+          primary_language: repoLang,
+          frameworks: [],
+          build_tools: [],
+          package_manager: repoLang === "JavaScript" ? "npm" : "",
+        }
+        finalDetectedArchitecture = {
+          architecture_type: "monolithic",
+          architecture_confidence: 0.5,
+          architecture_reason:
+            "Synthetic fallback (AI service did not return data)",
+        }
+        finalDetectedArchitectureType = "monolithic"
+        finalDetectedDeployment = {
+          docker: false,
+          kubernetes: false,
+          terraform: false,
+          helm: false,
+        }
+        finalRecommendedDeploymentTarget = null
+        finalDetectedDomain = "general"
+        finalSecurityCoverages = []
+        finalPipelineAugmentations = []
+        finalGeneratedStages = []
+        syntheticNote =
+          "Pipeline metadata was not available when the PDF was generated. " +
+          "Showing synthetic defaults derived from the repository's primary " +
+          "language. Re-run the analysis with the AI service available to " +
+          "get full Tahap-1 / Tahap-2 details."
+      }
       const payload = {
         repository_full_name: repoFullName,
         run_id: run.id,
         repository_description: repo?.description || "",
-        detected_technologies: detectedTechnologies,
-        detected_architecture: detectedArchitecture,
-        detected_architecture_type: detectedArchitectureType,
-        detected_deployment: detectedDeployment,
-        recommended_deployment_target: recommendedDeploymentTarget,
-        detected_domain: detectedDomain,
+        detected_technologies: finalDetectedTechnologies,
+        detected_architecture: finalDetectedArchitecture,
+        detected_architecture_type: finalDetectedArchitectureType,
+        detected_deployment: finalDetectedDeployment,
+        recommended_deployment_target: finalRecommendedDeploymentTarget,
+        detected_domain: finalDetectedDomain,
         domain_sub_type: domainSubType,
         domain_confidence: domainConfidence,
         domain_threats: domainThreats,
         features: features,
-        security_coverages: securityCoverages,
+        security_coverages: finalSecurityCoverages,
         ai_generated_rules: aiGeneratedRules,
-        pipeline_augmentations: pipelineAugmentations,
+        llm_generated_rules: llmGeneratedRules,
+        pipeline_augmentations: finalPipelineAugmentations,
         job_designs: jobDesigns,
         generated_workflow: generatedWorkflow,
-        generated_stages: generatedStages,
+        generated_stages: finalGeneratedStages,
         validation_passed: (run as any).validation_passed ?? true,
         validation_errors: (run as any).validation_errors ?? [],
         validation_warnings: (run as any).validation_warnings ?? [],
@@ -1470,8 +1771,21 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
           (analysis as any)?.security_coverage_score ?? null,
         severity_breakdown: severityBreakdown,
         recommendations: recommendations,
-        summary: summary,
+        summary: syntheticNote ?? summary,
       }
+      console.log("[pipeline] PDF payload:", {
+        repo: repoFullName,
+        run_id: run.id,
+        detected_technologies: payload.detected_technologies,
+        detected_architecture_type: payload.detected_architecture_type,
+        detected_domain: payload.detected_domain,
+        security_coverages_count: payload.security_coverages.length,
+        pipeline_augmentations_count: payload.pipeline_augmentations.length,
+        generated_stages_count: payload.generated_stages.length,
+        findings_count: payload.findings.length,
+        code_scanning_alerts_count: payload.code_scanning_alerts.length,
+        synthetic: !!syntheticNote,
+      })
       const result = await pdfMutation.mutateAsync({
         repoId: repoFullName,
         runId: run.id,
@@ -1490,7 +1804,22 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      setPdfMsg(`PDF generated (${(result.size / 1024).toFixed(1)} KB) — download started`)
+      // v9.5: surface fetch warnings + synthetic flag so the
+      // user knows when the PDF was generated from a
+      // partial/DB-only state (e.g. when the AI service was
+      // unreachable when they clicked the button).
+      const warnings: string[] =
+        (result as { fetch_warnings?: string[] }).fetch_warnings ?? []
+      const synthetic: boolean =
+        (result as { synthetic?: boolean }).synthetic ?? false
+      let msg = `PDF generated (${(result.size / 1024).toFixed(1)} KB) — download started`
+      if (synthetic) {
+        msg += " (synthetic — pipeline metadata not fully available)"
+      }
+      if (warnings.length > 0) {
+        msg += `\nNotes: ${warnings.join("; ")}`
+      }
+      setPdfMsg(msg)
     } catch (e: unknown) {
       const err = e as { response?: { data?: { detail?: string } }; message?: string }
       setPdfMsg(
@@ -1668,6 +1997,40 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
             (even if it has zero findings) so the user can recover
             from a transient log-fetch failure during the initial
             sync. */}
+        {/*
+          Bab 5.13.5: yellow banner when the on-mount pipeline
+          fetch did not return data. The PDF will still be
+          generated (with a synthetic fallback), but reviewers
+          should be able to see at a glance that the Tahap-1 /
+          Tahap-2 fields are empty so they can click "Fetch
+          Pipeline Data" to retry.
+        */}
+        {!pipelineResult && !pipelineLoading && (
+          <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-700" />
+            <div className="flex-1">
+              <p className="font-semibold">Pipeline data not loaded</p>
+              <p className="mt-0.5">
+                The Tahap-1 / Tahap-2 pipeline fields (architecture,
+                technologies, deployment, coverages, augmentations,
+                stages) are empty. The PDF will use a synthetic
+                fallback. Click <b>Fetch Pipeline Data</b> below to
+                retry the call to the AI service and populate the PDF
+                with the real Tahap-1 / Tahap-2 output.
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="shrink-0 border-amber-400 text-amber-900 hover:bg-amber-100"
+              onClick={() => void fetchPipelineData()}
+              disabled={pipelineLoading || !repo?.full_name}
+            >
+              <RefreshCw className="h-3 w-3 mr-1" />
+              Fetch Pipeline Data
+            </Button>
+          </div>
+        )}
         <Card>
           <CardContent className="pt-6">
             <div className="flex flex-wrap items-center gap-3">
@@ -1707,6 +2070,20 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
                   <RefreshCw className="h-4 w-4 mr-1" />
                 )}
                 {analyzeMutation.isPending ? "Refreshing…" : "Refresh Analysis"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void fetchPipelineData()}
+                disabled={pipelineLoading || !repo?.full_name}
+                title="Fetch Tahap-1/Tahap-2 pipeline data from the AI service"
+              >
+                {pipelineLoading ? (
+                  <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <Layers className="h-4 w-4 mr-1" />
+                )}
+                {pipelineLoading ? "Fetching…" : pipelineResult ? "Re-fetch Pipeline" : "Fetch Pipeline Data"}
               </Button>
               <Button
                 size="sm"
@@ -1756,8 +2133,6 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
           // UI through `liveAnalysis`.
           const findings: Array<{ source_tool?: string; scanner?: string; type?: string; severity?: string; file?: string; file_location?: string; line?: number; code_snippet?: string; explanation?: string; evidence?: string; recommendation?: string; remediation_recommendation?: string; title?: string }> =
             liveAnalysis?.findings ?? savedAnalysis.findings ?? []
-          const severity: Record<string, number> =
-            liveAnalysis?.severity_breakdown ?? savedAnalysis.severity_breakdown ?? {}
           const recommendations: Finding[] = savedAnalysis.recommendations ?? []
           const nodeIoRecords: NodeIORecord[] =
             (liveAnalysis?.node_io && liveAnalysis.node_io.length > 0
@@ -1771,156 +2146,21 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
             low: "bg-blue-100 text-blue-800 border-blue-300",
           }
 
-          type SeverityKey = "critical" | "high" | "medium" | "low"
-
-          // Bab 5.13.3: severity is bucketed by the CVSS base score,
-          // not by the raw GitHub "warning|error|note" string. This
-          // makes the breakdown match the industry-standard CVSS v3.1
-          // bands (critical >= 9.0, high >= 7.0, medium >= 4.0, low < 4.0)
-          // regardless of which scanner produced the finding.
-          const cvssBands: Record<SeverityKey, { count: number; sum: number }> = {
-            critical: { count: 0, sum: 0 },
-            high: { count: 0, sum: 0 },
-            medium: { count: 0, sum: 0 },
-            low: { count: 0, sum: 0 },
-          }
+          // Headline CVSS sum across the findings. Used by the
+          // "Total CVSS" badge in the Code Scanning Alerts card
+          // header — the value is rendered with a colour band
+          // (critical / high / medium / low) so the user can see
+          // the headline risk at a glance without a dedicated
+          // summary card.
           let totalCvss = 0
-          // Bucket anchors: representative CVSS score used when a
-          // finding carries a severity band but no numeric score
-          // (e.g. log-derived npm audit output). Keeps the
-          // Severity Breakdown card in sync with the Security
-          // Findings list even when the deterministic CVSS lookup
-          // has not run yet for a particular rule.
-          const bandAnchor: Record<SeverityKey, number> = {
-            critical: 9.5,
-            high: 7.5,
-            medium: 5.0,
-            low: 2.0,
-          }
-          for (const f of findings as Array<{ cvss_score?: number; cvss_severity?: string; severity?: string }>) {
-            const rawScore = typeof f.cvss_score === "number" ? f.cvss_score : null
-            const sevStr = (f.cvss_severity || f.severity || "").toLowerCase()
-            // Prefer cvss_severity (already banded by the 3-tier
-            // CVSS lookup); fall back to deriving the band from
-            // the raw CVSS score for findings that only carry a
-            // score; fall back to the severity string for log
-            // findings that have neither.
-            const band = (f.cvss_severity || "").toLowerCase() as SeverityKey
-            const derivedBand: SeverityKey =
-              band in cvssBands
-                ? band
-                : rawScore != null
-                  ? rawScore >= 9.0
-                    ? "critical"
-                    : rawScore >= 7.0
-                      ? "high"
-                      : rawScore >= 4.0
-                        ? "medium"
-                        : "low"
-                  : sevStr.includes("critical") || sevStr === "error"
-                    ? "critical"
-                    : sevStr.includes("high") || sevStr === "warning"
-                      ? "high"
-                      : sevStr.includes("medium") || sevStr === "note"
-                        ? "medium"
-                        : sevStr.includes("low") || sevStr === "info"
-                          ? "low"
-                          : "medium"
-            const effectiveScore = rawScore ?? bandAnchor[derivedBand]
-            cvssBands[derivedBand].count += 1
-            cvssBands[derivedBand].sum += effectiveScore
-            totalCvss += effectiveScore
-          }
-          const cvssBandLabel: Record<SeverityKey, string> = {
-            critical: "Critical",
-            high: "High",
-            medium: "Medium",
-            low: "Low",
-          }
-          const cvssBandColors: Record<SeverityKey, { bg: string; text: string; border: string }> = {
-            critical: { bg: "bg-red-100", text: "text-red-800", border: "border-red-300" },
-            high: { bg: "bg-orange-100", text: "text-orange-800", border: "border-orange-300" },
-            medium: { bg: "bg-yellow-100", text: "text-yellow-800", border: "border-yellow-300" },
-            low: { bg: "bg-blue-100", text: "text-blue-800", border: "border-blue-300" },
+          for (const f of findings as Array<{ cvss_score?: number }>) {
+            if (typeof f.cvss_score === "number") {
+              totalCvss += f.cvss_score
+            }
           }
 
           return (
             <>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {[
-                  { label: "Total CVSS", value: totalCvss > 0 ? totalCvss : null, invertBar: false, suffix: "", useBand: false },
-                  { label: "Risk Score", value: savedAnalysis.risk_score, invertBar: true, suffix: "", useBand: false },
-                  { label: "Compliance", value: savedAnalysis.compliance_score, invertBar: false, suffix: "", useBand: false },
-                  { label: "Security Coverage", value: savedAnalysis.security_coverage_score, invertBar: false, suffix: "", useBand: false },
-                ].map((m) => (
-                  <Card key={m.label}>
-                    <CardContent className="pt-4 pb-4">
-                      <div className="flex items-center gap-3">
-                        <span className={`text-2xl font-bold ${
-                          m.value == null ? "" :
-                          m.invertBar
-                            ? m.value >= 75 ? "text-red-600" : m.value >= 40 ? "text-yellow-600" : "text-green-600"
-                            : m.value >= 75 ? "text-green-600" : m.value >= 40 ? "text-yellow-600" : "text-red-600"
-                        }`}>
-                          {m.value != null
-                            ? (m.label === "Total CVSS"
-                                ? m.value.toFixed(1)
-                                : m.value.toFixed(1))
-                            : "-"}
-                        </span>
-                        <div className="flex-1 h-3 bg-gray-200 rounded-full overflow-hidden">
-                          <div className={`h-full rounded-full ${
-                            m.value == null ? "bg-gray-300" :
-                            m.invertBar
-                              ? m.value < 40 ? "bg-green-500" : m.value < 75 ? "bg-yellow-500" : "bg-red-500"
-                              : m.value < 40 ? "bg-red-500" : m.value < 75 ? "bg-yellow-500" : "bg-green-500"
-                          }`} style={{ width: `${Math.min(m.value ?? 0, 100)}%` }} />
-                        </div>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-1">{m.label}</p>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-
-              {/* Severity Breakdown by CVSS band (Bab 5.13.3).
-                  The bucket counts are derived from cvss_severity
-                  (preferred) or the raw CVSS score (fallback), so
-                  the same alert can be counted differently from its
-                  GitHub Code Scanning severity string. */}
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm font-medium">
-                    Severity Breakdown
-                  </CardTitle>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Buckets derived from the CVSS v3.1 base score (critical
-                    &ge; 9.0, high &ge; 7.0, medium &ge; 4.0, low &lt; 4.0).
-                    Not the GitHub Code Scanning severity string.
-                  </p>
-                </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    {(["critical", "high", "medium", "low"] as SeverityKey[]).map((b) => (
-                      <div
-                        key={b}
-                        className={`rounded-md border ${cvssBandColors[b].border} ${cvssBandColors[b].bg} px-3 py-3`}
-                      >
-                        <div className={`text-[10px] font-bold uppercase ${cvssBandColors[b].text}`}>
-                          {cvssBandLabel[b]}
-                        </div>
-                        <div className={`text-2xl font-bold ${cvssBandColors[b].text}`}>
-                          {cvssBands[b].count}
-                        </div>
-                        <div className={`text-[10px] ${cvssBandColors[b].text} font-mono opacity-75`}>
-                          CVSS Σ {cvssBands[b].sum.toFixed(1)}
-                        </div>
-                      </div>
-                     ))}
-                  </div>
-                </CardContent>
-              </Card>
-
               {savedAnalysis.ai_explanation && (
                 <Card>
                   <CardHeader>

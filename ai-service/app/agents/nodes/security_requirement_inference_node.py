@@ -65,12 +65,12 @@ Controls list with definitions:
 - license_check: license compliance (optional if package manager detected)
 - sbom: software bill of materials (recommended if containerized)
 - deploy: deployment (recommended if deployment config detected)
-- per_service_sast: run SAST per service directory (modular_monolith only)
-- per_service_dep_scan: dependency scan per service directory (modular_monolith only)
+- per_service_sast: run SAST per service directory (DISABLED per R2.1)
+- per_service_dep_scan: dependency scan per service directory (DISABLED per R2.1)
 - api_gateway_test: API gateway configuration audit (if api gateway detected)
 
-For modular_monolith: include per_service_* stages
-For monolithic: use single scan approach
+For monolitik: use single scan approach. Arsitektur bukan variabel
+eksperimen per R2.1, sehingga per_service_* stages TIDAK di-emit.
 
 Return ONLY valid JSON. No markdown.
 """
@@ -207,17 +207,20 @@ def _get_default_controls(technologies: dict, architecture: dict, deployment: di
     })
     
     if arch_type == "modular_monolith":
+        # Per R2.1, arsitektur bukan variabel eksperimen. Branch ini TIDAK
+        # akan pernah dieksekusi (arch_type selalu "monolithic"). Disimpan
+        # untuk backward compatibility.
         controls.append({
             "control": "per_service_sast",
-            "status": "recommended",
-            "reason": f"{arch_type} architecture - scan each module independently",
+            "status": "disabled",
+            "reason": f"{arch_type} architecture - per-service SAST disabled per R2.1 (monolithic only)",
             "tool": "semgrep",
             "tool_version": "latest"
         })
         controls.append({
             "control": "per_service_dep_scan",
-            "status": "recommended",
-            "reason": f"{arch_type} architecture - scan each module's dependencies",
+            "status": "disabled",
+            "reason": f"{arch_type} architecture - per-service dep scan disabled per R2.1 (monolithic only)",
             "tool": "trivy",
             "tool_version": "latest"
         })
@@ -308,14 +311,12 @@ def security_requirement_inference_node(state: PipelineEngineerState) -> Pipelin
     inferred = state.get("inferred_security_needs", {})
     
     if arch_type == "modular_monolith":
+        # Per R2.1, arsitektur bukan variabel eksperimen. Branch ini TIDAK
+        # akan pernah dieksekusi (arch_type selalu "monolithic"). Disimpan
+        # untuk backward compatibility.
         stages = inferred.get("required_stages", [])
         tools = inferred.get("required_tools", [])
-        for ms_stage in _MODULAR_STAGES:
-            if ms_stage not in stages:
-                stages.append(ms_stage)
-        for ms_tool in _MODULAR_TOOLS:
-            if ms_tool not in [t.get("name") if isinstance(t, dict) else t for t in tools]:
-                tools.append({"name": ms_tool, "purpose": "modular security", "language": "generic"})
+        # Disabled per R2.1 — no-op instead of appending modular stages
         inferred["required_stages"] = stages
         inferred["required_tools"] = tools
         state["inferred_security_needs"] = inferred

@@ -7,15 +7,12 @@ const api = axios.create({
   headers: {
     "Content-Type": "application/json",
   },
-  // No client-side timeout. The /pipeline/analyze endpoint can
-  // take several minutes when the AI agent re-runs on a fresh
-  // log (LLM call + scanner artifact download + CVSS lookup).
-  // A 90s ceiling caused the spinner to fail with "timeout
-  // exceeded" even though the request was still in flight on
-  // the server, which was misleading. The server still has
-  // its own internal timeouts; if the AI service itself is
-  // hung the request will fail there, not here.
-  timeout: 0,
+  // Match the nginx proxy_read_timeout (600s). If the server
+  // takes longer than this, something is genuinely stuck (e.g.
+  // LLM provider hang, deadlock in pipeline graph). The
+  // previous 0 (disabled) meant the browser spinner would spin
+  // forever with no feedback.
+  timeout: 600_000,
 })
 
 api.interceptors.request.use((config) => {
@@ -78,6 +75,9 @@ api.interceptors.response.use(
       }
     }
     const message = error.response?.data?.error || error.response?.data?.message || error.message || "An error occurred"
+    if (error.code === "ECONNABORTED") {
+      return Promise.reject(new Error("Request timed out. The AI service is taking too long to respond. Please try again."))
+    }
     return Promise.reject(new Error(message))
   }
 )

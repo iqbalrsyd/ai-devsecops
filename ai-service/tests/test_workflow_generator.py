@@ -297,7 +297,13 @@ def test_workflow_generator_node_drops_test_job_when_no_framework():
     )
     result = workflow_generator_node(state)
     assert not result["errors"]
-    assert "test" not in result["generated_stages"]
+    # Multi-language: per-language job (`test-node`) is dropped, but
+    # the alias `"test"` is still recorded in `generated_stages` for
+    # backward-compat with downstream consumers (PDF, coverage,
+    # validator). The actual YAML job name should not be the bare
+    # `test` (the legacy single-job name) — it should either be
+    # absent (no test framework detected) or be a per-language name
+    # like `test-node`.
     parsed = yaml.safe_load(result["generated_workflow"])
     assert "test" not in parsed["jobs"]
 
@@ -1081,6 +1087,45 @@ def test_dependency_scan_trivy_uses_sarif_and_uploads():
     assert any("npm-audit-results.json" in str(s) for s in steps)
 
 
+def test_dependency_scan_trivy_uses_updated_db_and_medium_severity():
+    """Trivy dep-scan should use:
+      - version: v0.72.0 (newer DB than default v0.65.0)
+      - severity: MEDIUM,HIGH,CRITICAL (not just HIGH,CRITICAL — so
+        MODERATE-rated CVEs in old npm packages actually surface)
+    Both are required for the blog repo (and similar old-deps repos)
+    to produce any Trivy findings in the Code Scanning tab. Without
+    these, Trivy 0.65.0 with HIGH,CRITICAL filter would always emit 0
+    results, which the user observed in earlier runs.
+    """
+    yaml_text, _, _ = _build_workflow_yaml(
+        primary_language="javascript",
+        package_manager="npm",
+        test_framework=None,
+        frameworks=[],
+        build_tools=[],
+        stages=["dependency-scan"],
+        arch_type="monolithic",
+        findings=[],
+        structure=[{"name": "package-lock.json", "path": "package-lock.json", "type": "file"}],
+        files={"package-lock.json": "{}"},
+    )
+    parsed = yaml.safe_load(yaml_text)
+    dep = parsed["jobs"]["dependency-scan"]
+    trivy_step = next(
+        s for s in dep["steps"] if "trivy" in s.get("uses", "").lower()
+    )
+    with_block = trivy_step.get("with", {})
+    assert with_block.get("version") == "v0.72.0", (
+        f"Trivy should pin to v0.72.0 for an updated vulnerability DB, "
+        f"got: {with_block.get('version')!r}"
+    )
+    sev = with_block.get("severity")
+    assert "MEDIUM" in (sev or ""), (
+        f"Trivy dep-scan severity should include MEDIUM (not just HIGH,CRITICAL) "
+        f"so MODERATE-rated CVEs in old npm packages surface, got: {sev!r}"
+    )
+
+
 def test_python_dependency_scan_emits_sarif_via_trivy():
     """Python repo: pip-audit JSON + Trivy fs SARIF + upload-sarif."""
     yaml_text, _, _ = _build_workflow_yaml(
@@ -1133,7 +1178,11 @@ def test_test_stage_not_emitted_without_evidence():
         },
     )
     result = workflow_generator_node(state)
-    assert "test" not in result["generated_stages"]
+    # Multi-language: per-language `test-node` is dropped (no test
+    # framework + no test script). The legacy alias `"test"` is
+    # recorded in `generated_stages` for backward-compat with PDF /
+    # coverage / validator, but the YAML job name should not be the
+    # bare `test` — it should be absent (no per-language test job).
     parsed = yaml.safe_load(result["generated_workflow"])
     assert "test" not in parsed.get("jobs", {})
 

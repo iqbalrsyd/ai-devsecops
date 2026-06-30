@@ -85,7 +85,7 @@ Pipeline AI agent punya **20 node** (lihat `ARCHITECTURE.md`). Dari 20 itu, **8 
 |---|---|
 | **LLM?** | ✅ Ya (fallback setelah heuristic) |
 | **Input ke LLM** | `repo_name`, `package_files` (dependencies), `structure_summary`, `heuristic_signals` (file count, has_dockerfile, has_k8s_yaml) |
-| **Output LLM (JSON)** | `{architecture_type: "monolithic"\|"microservices"\|"modular_monolith"\|"serverless"\|"library"\|"unknown", confidence: 0-1, reasoning: str, indicators: [...]}` |
+| **Output LLM (JSON)** | `{architecture_type: "monolithic" (only, per R2.1), confidence: 0-1, reasoning: str, indicators: [...]}` |
 | **Fallback** | Deterministic by file count + framework detection |
 | **State update** | `state["detected_architecture"]` + `state["detected_architecture_type"]` + `state["detected_architecture_confidence"]` |
 | **Prompt file** | `architecture_detection_node.py:line ~50` |
@@ -111,7 +111,7 @@ Pipeline AI agent punya **20 node** (lihat `ARCHITECTURE.md`). Dari 20 itu, **8 
 | **Fallback** | Empty array kalau LLM gagal (caller pakai pattern_findings saja) |
 | **State update** | `state["findings"]` (overwrite atau extend) |
 | **Prompt file** | `vulnerability_scan_node.py:line 21` |
-| **Catatan** | 70 lines prompt — list 20 vulnerability patterns (hardcoded secret, SQLi, XSS, SSRF, JWT weak, dll) + 8 microservice-specific patterns |
+| **Catatan** | 70 lines prompt — list 20 vulnerability patterns (hardcoded secret, SQLi, XSS, SSRF, JWT weak, dll) |
 
 #### 1.5 `domain_detection_node`
 
@@ -430,7 +430,7 @@ OUTPUT (state):
 | Node | LLM? | Alasan |
 |---|---|---|
 | `technology_detection` | ✅ (fallback) | Heuristic miss untuk bahasa/framework jarang (e.g. Bun, Deno). LLM fallback untuk akurasi. |
-| `architecture_detection` | ✅ (fallback) | LLM lebih akurat baca signal kontekstual (e.g. microservice = separate services detected). |
+| `architecture_detection` | ✅ (fallback) | LLM lebih akurat baca signal kontekstual. Per R2.1 output selalu "monolithic". |
 | `deployment_detection` | ✅ (fallback) | Similar — deployment target kadang ambiguous. |
 | `vulnerability_scan` | ✅ (wajib) | LLM **WAJIB** untuk SAST. Pattern matching alone = false positive. LLM membaca konteks kode. |
 | `domain_detection` | ✅ (wajib) | LLM **WAJIB** untuk klasifikasi domain. Tidak bisa deterministic (e-commerce vs fintech = business logic). |

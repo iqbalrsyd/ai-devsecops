@@ -154,40 +154,17 @@ def _get_arch_type(architecture) -> str:
 
 
 def _resolve_arch_type(state: PipelineEngineerState) -> str:
-    """Resolve architecture type with deterministic fallback for Tahap 1.
+    """Resolve architecture type — always returns "monolithic".
 
-    Order of preference:
-      1. `state["detected_architecture_type"]` if LLM already produced one
-         AND it's not the default `monolithic` fallback.
-      2. Deterministic file-based detection of FE/BE split OR multi-service
-         manifests to upgrade `monolithic` to `modular_monolith`.
-      3. `monolithic` (final fallback).
+    Per skripsi Bab 3 (revisi 3-domain & 1-architecture), arsitektur bukan
+    variabel eksperimen (batasan B7). Semua arsitektur diperlakukan sebagai
+    monolitik tradisional, termasuk FE/BE split dan modular monolith yang
+    sebelumnya dinaikkan ke "modular_monolith". Sistem internal TIDAK lagi
+    menaikkan ke modular_monolith, sehingga semua repo diklasifikasikan
+    sebagai "monolithic" untuk konsistensi eksperimen.
 
-    Why this matters:
-      * The LLM-based architecture_detection_node sometimes returns
-        `monolithic` when it has no clear evidence, even for repos that
-        are obviously multi-service. A repo with both `frontend/`
-        and `backend/` (or `client/` + `api/`) at the top level is
-        not a monolithic app.
-      * The fallback is intentionally conservative: it only fires when
-        the FE side has its own manifest AND the BE side has its own
-        manifest. A repo with just `backend/` is still monolithic.
-      * Only the two arch types from skripsi Bab 3 (revisi 3-domain &
-        2-architecture) are supported: monolithic, modular_monolith.
+    Fokus variasi ada di domain (R2.2): e-commerce, blog, iot.
     """
-    arch = (state.get("detected_architecture_type") or "").lower().strip()
-    if arch in ("modular_monolith",):
-        return "modular_monolith"
-    if arch and arch not in ("", "unknown", "general", "monolithic"):
-        # Any other non-monolithic value collapses to modular_monolith.
-        return "modular_monolith"
-    # LLM either did not run or defaulted to monolithic. Try to upgrade.
-    structure = state.get("repository_structure") or []
-    files = state.get("repository_files") or {}
-    if _has_frontend_backend_split(structure, files):
-        return "modular_monolith"
-    if _has_service_manifest(structure, files) and _has_docker_compose(structure, files):
-        return "modular_monolith"
     return "monolithic"
 
 
@@ -450,6 +427,23 @@ def workflow_generator_node(state: PipelineEngineerState) -> PipelineEngineerSta
             print(f"[DEBUG] prerequisite-skipped jobs: {[s['job'] for s in prereq['skipped_jobs']]}")
 
         # Build the workflow deterministically.
+        # ------------------------------------------------------------------
+        # Multi-language: resolve active LanguageProfile list once and
+        # pass it down to `_build_workflow_yaml`. The function still
+        # works without profiles (back-compat: falls back to the
+        # original `has_node` / `has_python` if/elif branches).
+        # ------------------------------------------------------------------
+        from app.agents.language_profiles import (
+            resolve_active_profiles,
+            list_supported_languages,
+        )
+        active_profiles = resolve_active_profiles(technologies)
+        # Stash the list of supported languages for the response payload
+        # so the FE can show "what languages does this generator support"
+        # even if the current repo only uses 1.
+        state["active_language_profiles"] = [p.id for p in active_profiles]
+        state["supported_languages"] = list_supported_languages()
+
         yaml_text, stage_names, explanations = _build_workflow_yaml(
             primary_language=primary_language,
             package_manager=package_manager,
@@ -465,6 +459,7 @@ def workflow_generator_node(state: PipelineEngineerState) -> PipelineEngineerSta
             domain_confidence=state.get("domain_confidence"),
             domain_threats=state.get("domain_threats"),
             state=state,
+            active_profiles=active_profiles,
         )
 
         # Requirement 9: surface any stage that was selected but lacks repository
@@ -883,10 +878,9 @@ def _dir_has_any(
 def _has_service_manifest(structure: list, files: dict) -> bool:
     """Return True if at least one service manifest file is present.
 
-    Used to gate the `dependency-scan-per-service` stage for
-    microservices/modular_monolith architectures. A repo with no
-    package manager manifest at all has no service-level dependency
-    surface to scan (e.g. a pure IaC repo with only Terraform files).
+    Per skripsi R2.1, arsitektur bukan variabel eksperimen. Helper ini
+    tetap dipertahankan untuk evidence-based detection (file presence),
+    namun tidak lagi digunakan untuk menaikkan arsitektur ke multi-service.
     """
     return _has_file(structure, files, _SERVICE_MANIFEST_PATTERNS)
 
@@ -1180,20 +1174,16 @@ def _select_relevant_stages(
     if ("sbom" in requested or has_docker) and has_docker:
         stages.append("sbom")
 
-    # ---- multi-service stages (modular_monolith / FE+BE) ----
-    # These are gated on architecture type AND repository evidence
-    # (requirement 1: file evidence is the single source of truth).
-    # `modular_monolith` is the supported multi-service arch per
-    # skripsi Bab 3 (revisi 3-domain & 2-architecture); it covers both
-    # the FE/BE split and other multi-module single-deploy layouts.
-    is_multi_service_arch = arch_type in (
-        "modular_monolith",
-    )
+    # ---- multi-service stages ----
+    # Per skripsi Bab 3 (revisi 3-domain & 1-architecture), arsitektur bukan
+    # variabel eksperimen. Semua arsitektur diperlakukan monolitik. Stage
+    # multi-service hanya di-emit jika ada file evidence (docker-compose)
+    # — bukan berdasarkan tipe arsitektur.
+    is_multi_service_arch = False  # selalu False per R2.1
 
-    # docker-compose-validate: only for multi-service arch + a real
-    # compose file. A bare Dockerfile is not a stack and has nothing
-    # to validate.
-    if is_multi_service_arch and (
+    # docker-compose-validate: hanya untuk repo dengan docker-compose
+    # file. Arsitektur tidak lagi menaikkan ke multi-service.
+    if has_docker_compose and (
         "docker-compose-validate" in requested or has_docker_compose
     ) and has_docker_compose:
         stages.append("docker-compose-validate")
@@ -1247,8 +1237,7 @@ def _filter_stages_by_evidence(
     has_build_evidence = _has_build_script(structure, files, package_manager) or bool(technologies.get("build_tools"))
     has_docker_compose = _has_docker_compose(structure, files)
     has_service_manifest = _has_service_manifest(structure, files)
-    arch_type = _resolve_arch_type(state)
-    is_multi_service_arch = arch_type == "modular_monolith"
+    # arch_type selalu "monolithic" per R2.1, tidak perlu is_multi_service_arch
 
     allowed: list[str] = []
     for stage in stages:
@@ -1267,14 +1256,12 @@ def _filter_stages_by_evidence(
         if stage in ("container-scan", "container-build", "sbom") and not has_docker:
             continue
         # iac-scan REMOVED in struktur-v9.1
-        # Multi-service stages (struktur-v6 §3.6.1):
-        # require both the architecture type AND repository evidence.
-        if stage == "docker-compose-validate" and not (
-            is_multi_service_arch and has_docker_compose
-        ):
+        # Multi-service stages: per R2.1, arsitektur bukan variabel.
+        # Stage hanya di-emit jika ada file evidence langsung.
+        if stage == "docker-compose-validate" and not has_docker_compose:
             continue
         if stage == "dependency-scan-per-service" and not (
-            is_multi_service_arch and has_service_manifest
+            has_docker_compose and has_service_manifest
         ):
             continue
         allowed.append(stage)
@@ -1303,8 +1290,7 @@ def _flag_invalid_stages(
     has_build_evidence = _has_build_script(structure, files, package_manager) or bool(technologies.get("build_tools"))
     has_docker_compose = _has_docker_compose(structure, files)
     has_service_manifest = _has_service_manifest(structure, files)
-    arch_type = _resolve_arch_type(state)
-    is_multi_service_arch = arch_type in ("microservices", "modular_monolith", "frontend_backend")
+    # arch_type selalu "monolithic" per R2.1
 
     invalid: list[dict] = []
     for stage in stages:
@@ -1327,19 +1313,16 @@ def _flag_invalid_stages(
                 "reason": "no Dockerfile or docker-compose file detected in repository analysis",
             })
         # iac-scan REMOVED in struktur-v9.1
-        elif stage == "docker-compose-validate" and not (
-            is_multi_service_arch and has_docker_compose
-        ):
+        elif stage == "docker-compose-validate" and not has_docker_compose:
             invalid.append({
                 "stage": stage,
                 "expected": False,
                 "reason": (
-                    "no docker-compose.yml/compose.yaml in repository, or "
-                    "architecture is not modular_monolith"
+                    "no docker-compose.yml/compose.yaml in repository"
                 ),
             })
         elif stage == "dependency-scan-per-service" and not (
-            is_multi_service_arch and has_service_manifest
+            has_docker_compose and has_service_manifest
         ):
             invalid.append({
                 "stage": stage,
@@ -1347,7 +1330,7 @@ def _flag_invalid_stages(
                 "reason": (
                     "no service manifest (package.json, requirements.txt, "
                     "go.mod, Cargo.toml, pom.xml) detected in repository, "
-                    "or architecture is not modular_monolith"
+                    "or no docker-compose file"
                 ),
             })
     return invalid
@@ -1473,24 +1456,18 @@ def _flag_unjustified_requested_stages(state: PipelineEngineerState) -> list[dic
                 "manifest). The build stage was omitted from the workflow."
             ),
         })
-    # per_service_dep_scan: only emits as a separate job for
-    # microservices/modular_monolith (see _select_relevant_stages). On
-    # a monolithic repo, the same capability is provided by the root
-    # `dependency-scan` job (npm audit + Trivy fs), so we surface a
-    # clear "merged_into" message rather than letting the requested
-    # control silently disappear.
-    is_multi_service_arch = _resolve_arch_type(state) == "modular_monolith"
-    if "per-service-dep-scan" in requested and not is_multi_service_arch:
+    # per_service_dep_scan: per R2.1, arsitektur bukan variabel eksperimen.
+    # Arsitektur selalu monolitik, sehingga per-service matrix TIDAK di-emit.
+    # Kapabilitas dependency-scan diberikan oleh root job (npm audit + Trivy fs).
+    if "per-service-dep-scan" in requested:
         invalid.append({
             "stage": "per-service-dep-scan",
             "expected": False,
             "reason": (
-                "'per_service_dep_scan' was requested by security inference "
-                "but the detected architecture is monolithic (not "
-                "modular_monolith). The same dependency-scan "
-                "capability is provided by the root 'dependency-scan' job "
-                "(npm audit + Trivy fs). The per-service matrix job is only "
-                "emitted for multi-service architectures."
+                "'per_service_dep_scan' was requested but arsitektur is not "
+                "a variable in this experiment (R2.1 — monolithic only). "
+                "The same dependency-scan capability is provided by the root "
+                "'dependency-scan' job (npm audit + Trivy fs)."
             ),
         })
     return invalid
@@ -1526,8 +1503,8 @@ def _build_vignette_context(
       - domain_brief: short string describing the detected domain
       - priority_threats: list of domain-specific threats to emphasize
 
-    For microservices, the insert references service_count and service_paths.
-    For monolith, the insert describes a single-workflow approach.
+    Per R2.1, arsitektur selalu monolitik. Branch modular_monolith hanya
+    untuk backward compatibility (tidak pernah dieksekusi).
     """
     arch = (arch_type or "monolithic").lower()
     domain = (detected_domain or "general").lower()
@@ -1535,27 +1512,27 @@ def _build_vignette_context(
     threats = list(domain_threats or [])
 
     if arch == "modular_monolith":
+        # Per R2.1, arsitektur bukan variabel eksperimen. Branch ini
+        # TIDAK akan pernah diambil karena _resolve_arch_type selalu
+        # mengembalikan "monolithic". Disimpan sebagai fallback untuk
+        # backward compatibility jika diaktifkan kembali di masa depan.
         sc = service_count or 0
         sp = service_paths or []
         architecture_insert = (
             f"This repository has {sc} module(s) deployed together "
             f"{'at ' + ', '.join(sp[:6]) if sp else ''}. "
-            f"Modular-monolith strategy (skripsi Bab 3, revisi 3-domain & 2-architecture): "
+            f"Modular-monolith strategy (legacy, disabled per R2.1): "
             f"`docker-compose-validate` checks the compose file first, "
-            f"then `dependency-scan-per-service` uses a matrix strategy "
-            f"to run the appropriate CVE scanner (npm audit, pip-audit, "
-            f"govulncheck, cargo audit, trivy fs) for each service "
-            f"directory. `sast` (Semgrep) is run ONCE at the root with "
-            f"the full ruleset; per-finding `path` already locates the "
-            f"module, and cross-module rules would be missed by a "
-            f"per-module split. Do NOT generate a separate workflow "
-            f"file per module — keep a single workflow with matrix jobs."
+            f"then `dependency-scan-per-service` uses a matrix strategy. "
+            f"`sast` (Semgrep) is run ONCE at the root with the full ruleset. "
+            f"Do NOT generate a separate workflow file per module."
         )
     else:
         architecture_insert = (
             "You are generating a SINGLE workflow for a monolithic application. "
             "All security scans should run in one sequential pipeline covering "
-            "the entire codebase. Use a single build artifact."
+            "the entire codebase. Use a single build artifact. "
+            "(Arsitektur bukan variabel eksperimen per R2.1 — monolitik only.)"
         )
 
     domain_brief = f"{domain} (confidence: {confidence:.2f})"
@@ -1651,7 +1628,8 @@ ALLOWED_STAGES: tuple[str, ...] = (
     # which is the AI-driven equivalent. Domain-specific static templates
     # are kept in `_build_*_job` helpers for unit-test back-compat but
     # are never emitted by the generator.
-    # ── v9.2: per-service / per-microservice stages REMOVED ──────
+    # ── v9.5: per-service / per-microservice stages DISABLED per R2.1 ──────
+    # Arsitektur bukan variabel eksperimen. Monolithic only.
     # The user explicitly requested that the generator stop
     # emitting `detect-services`, `dependency-scan-per-service`, and
     # `docker-compose-validate`. Custom per-repo jobs now come
@@ -1790,6 +1768,14 @@ def _validate_workflow_yaml(
         if not isinstance(job_cfg, dict):
             continue
         if job_name in ALLOWED_STAGES or job_name in ai_allowed:
+            continue
+        # Multi-language: accept `lint-<id>` / `test-<id>` / `dep-scan-<id>`
+        # jobs emitted by `language_profiles.render_*_jobs` for monorepos.
+        if (
+            job_name.startswith("lint-")
+            or job_name.startswith("test-")
+            or job_name.startswith("dep-scan-")
+        ):
             continue
         errors.append(
             f"Job '{job_name}' is not in the allowed stages: {list(ALLOWED_STAGES)}"
@@ -2611,10 +2597,11 @@ def _semgrep_rules_for_domain(detected_domain: str | None) -> list[str]:
 def _semgrep_rules_for_coverages(applicable_coverages: list[str]) -> list[str]:
     """Return Semgrep rule files contributed by applicable security coverages.
 
-    struktur-v9: each applicable coverage may contribute additional rule
-    files beyond what the detected domain provides. For example, a
-    microservices repo with no clear domain still gets `owasp-api.yml`
-    rules via the `api_security` and `microservice_security` coverages.
+     struktur-v9: each applicable coverage may contribute additional rule
+     files beyond what the detected domain provides. For example, a
+     monolitik repo with no clear domain still gets `owasp-api.yml`
+     rules via the `api_security` coverage. (microservice_security
+     sudah dihapus per R2.1.)
 
     Returns deduplicated list of rule file names (without path).
     """
@@ -2925,7 +2912,7 @@ def _render_semgrep_docker_run(config_args: list[str], output_path: str,
         "            semgrep \\",
         *config_lines,
         f"                --sarif --output=/out/{output_path} \\",
-        f"                --timeout={timeout} --no-error /src",
+        f"                --timeout={timeout} --no-suppress-errors /src",
     ]
 
 
@@ -3484,58 +3471,285 @@ def _ensure_sarif_fallback(
     ]
 
 
+def _ensure_sarif_from_annotations(
+    filename: str,
+    tool_name: str,
+    tool_version: str = "1.0.0",
+    information_uri: str = "https://github.com/iqbalrsyd/ai-devsecops",
+    rule_id_prefix: str = "ai-devsecops",
+) -> list[str]:
+    """Return YAML lines for a Python step that converts
+    `::error file=...::msg` and `::warning file=...::msg` annotations
+    emitted by the upstream `shell_check` steps into SARIF 2.1.0
+    results. The script is captured from the per-job log file written
+    by `_wrap_shell_check_for_sarif` (one entry per job, in
+    `${cat}.shell_log`).
+
+    Implementation: a single `python3` invocation that reads the log
+    file, parses the GitHub workflow-command annotation format, and
+    writes SARIF. This replaces the previous approach (which called
+    `github.rest.actions.listWorkflowRunAnnotations` — that endpoint
+    does not exist on the GitHub REST API). The log-file approach is
+    self-contained and works for any job, including reusable
+    workflows invoked via `uses: ./.../ai-devsecops-custom.yml`.
+
+    The step is always run (`if: always()`) so a failing shell_check
+    step does not skip SARIF conversion. If no annotations are
+    present, the existing SARIF file is left untouched.
+    """
+    # Inline Python script. Reads ${cat}.shell_log, parses
+    # `::error/warning [file=...,line=...,title=...]::msg` lines,
+    # writes SARIF.
+    #
+    # The regex accepts the full GitHub Actions annotation format:
+    #   ::error file={path},line={n},endLine={n},title={text}::{message}
+    # All properties are optional. Common forms that must be
+    # supported (observed in LLM-generated scripts):
+    #   ::error file=src/x.js::msg
+    #   ::error file=src/x.js,line=33::msg
+    #   ::error title=Markdown XSS::msg
+    #   ::error title=Foo,file=src/x.js::msg
+    #   ::error::msg                           (bare, no properties)
+    py_script = (
+        "import os, re, json\n"
+        f"log_path = '{tool_name}.shell_log'\n"
+        f"sarif_path = {filename!r}\n"
+        f"tool_name = {tool_name!r}\n"
+        f"tool_version = {tool_version!r}\n"
+        f"information_uri = {information_uri!r}\n"
+        f"rule_id_prefix = {rule_id_prefix!r}\n"
+        "results = []\n"
+        "if os.path.exists(log_path):\n"
+        # Match ::error|warning followed by an optional property list
+        # of comma-separated key=value pairs (key may be file|line|
+        # endLine|col|endColumn|title|...) and :: separator + message.
+        # Group 1: level (error|warning)\n"
+        # Group 2: file path (None if not present)\n"
+        # Group 3: line number (None if not present)\n"
+        # Group 4: title (None if not present)\n"
+        # Group 5: message body\n"
+        "    pat = re.compile(\n"
+        "        r'^::(error|warning)(?:\\s+([A-Za-z]+=[^,]+(?:,[A-Za-z]+=[^,]+)*))?::(.*)$'\n"
+        "    )\n"
+        "    for idx, line in enumerate(open(log_path, encoding='utf-8', errors='replace')):\n"
+        "        m = pat.match(line.rstrip('\\n'))\n"
+        "        if not m:\n"
+        "            continue\n"
+        "        level, props, msg = m.groups()\n"
+        "        path = None\n"
+        "        sl = None\n"
+        "        el = None\n"
+        "        title = None\n"
+        "        if props:\n"
+        "            for kv in props.split(','):\n"
+        "                if '=' in kv:\n"
+        "                    k, v = kv.split('=', 1)\n"
+        "                    k = k.strip()\n"
+        "                    v = v.strip()\n"
+        "                    if k == 'file':\n"
+        "                        path = v\n"
+        "                    elif k == 'line':\n"
+        "                        try:\n"
+        "                            sl = int(v)\n"
+        "                        except ValueError:\n"
+        "                            pass\n"
+        "                    elif k in ('endLine', 'col'):\n"
+        "                        try:\n"
+        "                            el = int(v) if k == 'endLine' else sl\n"
+        "                        except ValueError:\n"
+        "                            pass\n"
+        "                    elif k == 'title':\n"
+        "                        title = v\n"
+        "        if sl is None:\n"
+        "            sl = 1\n"
+        "        if el is None:\n"
+        "            el = sl\n"
+        "        sarif_level = 'error' if level == 'error' else 'warning'\n"
+        "        msg = (msg or '').strip()\n"
+        "        # If there is no file but there is a title, use the\n"
+        #        title as the message body (otherwise SARIF would\n"
+        #        show '(no message)' which is useless).\n"
+        "        if not msg and title:\n"
+        "            msg = title\n"
+        "        # Use the first 50 chars of the title (if any) as\n"
+        #        part of the rule id slug, since it is more stable\n"
+        #        than the body message.\n"
+        "        slug_src = title or msg or 'finding'\n"
+        "        slug = re.sub(r'[^a-z0-9]+', '-', slug_src.lower())[:50].strip('-')\n"
+        "        rule_id = f'{rule_id_prefix}-{slug}-{sl}-{idx}'\n"
+        "        results.append({\n"
+        "            'ruleId': rule_id,\n"
+        "            'level': sarif_level,\n"
+        "            'message': {'text': msg or '(no message)'},\n"
+        "            'locations': [{\n"
+        "                'physicalLocation': {\n"
+        "                    'artifactLocation': {'uri': path or 'unknown'},\n"
+        "                    'region': {'startLine': sl, 'endLine': el},\n"
+        "                },\n"
+        "            }],\n"
+        "        })\n"
+        "existing = {}\n"
+        "if os.path.exists(sarif_path) and os.path.getsize(sarif_path) > 0:\n"
+        "    try:\n"
+        "        existing = json.load(open(sarif_path, encoding='utf-8'))\n"
+        "    except Exception:\n"
+        "        existing = {}\n"
+        "if not existing or 'runs' not in existing or not existing['runs']:\n"
+        "    existing = {\n"
+        "        'version': '2.1.0',\n"
+        "        '$schema': 'https://json.schemastore.org/sarif-2.1.0.json',\n"
+        "        'runs': [{\n"
+        "            'tool': {'driver': {\n"
+        "                'name': tool_name, 'version': tool_version, 'informationUri': information_uri,\n"
+        "            }},\n"
+        "            'results': [],\n"
+        "        }],\n"
+        "    }\n"
+        "existing['runs'][0]['tool']['driver']['name'] = tool_name\n"
+        "existing['runs'][0]['tool']['driver']['version'] = tool_version\n"
+        "existing['runs'][0]['tool']['driver']['informationUri'] = information_uri\n"
+        "existing['runs'][0]['results'] = (existing['runs'][0].get('results') or []) + results\n"
+        "with open(sarif_path, 'w', encoding='utf-8') as f:\n"
+        "    json.dump(existing, f, indent=2)\n"
+        "print(f'Wrote {len(results)} SARIF result(s) to {sarif_path}')\n"
+    )
+    # Emit as a two-step approach that is robust against YAML / bash
+    # heredoc quirks:
+    #   1. Write the Python script to a file using a *quoted*
+    #      heredoc with no leading whitespace on the terminator
+    #      (so bash recognises it).
+    #   2. Run `python3 <script.py>`.
+    # This avoids two issues we hit with the inline `python3 - <<EOF`
+    # approach:
+    #   (a) YAML block scalars strip the *common* leading indent
+    #       uniformly, so the heredoc terminator ends up indented;
+    #       bash only accepts an unindented terminator for `<<EOF`
+    #       (or `<<-EOF` which strips *tabs only*, not spaces).
+    #   (b) The Python script lines would also be indented by YAML
+    #       block-scalar processing, causing IndentationError because
+    #       the top-level statements no longer start at column 0.
+    script_file = f"{tool_name}_annotations_to_sarif.py"
+    py_lines = [f"          cat > {script_file} <<'PY_EOF'"]
+    for ln in py_script.splitlines():
+        py_lines.append("          " + ln)
+    py_lines.append("          PY_EOF")
+    py_lines.append(f"          python3 {script_file}")
+    return [
+        f"      - name: Convert {tool_name} shell_check annotations to SARIF",
+        "        if: always()",
+        "        run: |",
+        *py_lines,
+    ]
+
+
 def _ensure_npm_audit_sarif_conversion() -> list[str]:
     """Return YAML lines for converting npm audit JSON to SARIF 2.1.0.
 
-    npm audit --json output is a flat dict of {packageName: {...via: [...]}}.
-    This step parses the JSON and emits a valid OASIS SARIF document so
-    findings appear in the GitHub Code Scanning Security tab.
+    npm audit --json output is a flat dict of `{packageName: {via: [...]}}`.
+    `via` items can be EITHER a string (a transitive parent package name)
+    OR a dict (an advisory with `title`, `source`, `name`, `url`, ...).
+    The previous conversion only processed dict entries, missing the
+    string entries (which represent transitive chains that often point
+    to the real vulnerable package).
+
+    This rewritten conversion:
+      1. Iterates over `via` and handles BOTH string and dict types
+         — for string entries, the parent package name is included in
+         the message so the dependency chain is visible in the alert.
+      2. Uses the advisory `url` to extract a stable CVE/GHSA id when
+         available (e.g. `CVE-2024-12345` or `GHSA-xxxx-yyyy-zzzz`)
+         so the ruleId is stable and dedup-friendly across runs.
+      3. Always emits one SARIF result per (package, via) combination
+         — the previous code deduped across all packages and silently
+         dropped findings when two packages shared the same advisory
+         title.
+      4. Includes `severity`, `version range`, `parent package` and
+         the original `via` payload in `properties` so reviewers can
+         triage without leaving the Security tab.
     """
     return [
         "      - name: Convert npm audit JSON to SARIF",
         "        if: always() && hashFiles('npm-audit-results.json') != ''",
         "        run: |",
-        '          python3 -c "',
-        "          import json, sys",
+        '          python3 << "PY_EOF_NPM_AUDIT"',
+        "          import json, sys, re",
         "          try:",
         "              with open('npm-audit-results.json') as f:",
         "                  data = json.load(f)",
         "              vulns = data.get('vulnerabilities', {})",
         "              results = []",
+        "              cve_re = re.compile(r'CVE-\\d{4}-\\d{4,7}')",
+        "              ghsa_re = re.compile(r'GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}')",
         "              for pkg, info in vulns.items():",
         "                  if not info.get('via'):",
         "                      continue",
-        "                  severity = info.get('severity','moderate')",
-        "                  level = 'error' if severity in ('critical','high') else 'warning'",
-        "                  seen_cves = set()",
+        "                  severity = info.get('severity', 'moderate')",
+        "                  level = 'error' if severity in ('critical', 'high') else 'warning'",
+        "                  range_ = info.get('range', '')",
         "                  for via in info['via']:",
-        "                      if isinstance(via, dict):",
-        "                          cve_id = via.get('title','')",
-        "                          if cve_id and cve_id not in seen_cves:",
-        "                              seen_cves.add(cve_id)",
-        "                              results.append({",
-        "                                  'ruleId': cve_id,",
-        "                                  'message': {'text': cve_id + ' in ' + pkg + ' ' + info.get('range','')},",
-        "                                  'level': level,",
-        "                                  'locations': [{'physicalLocation': {'artifactLocation': {'uri': 'package.json'}}}],",
-        "                                  'properties': {'package': pkg, 'version': info.get('range',''), 'severity': severity}",
-        "                              })",
+        "                      if isinstance(via, str):",
+        "                          # String entry: transitive parent.",
+        "                          # The advisory is held in the original",
+        "                          # audit metadata; emit a finding keyed",
+        "                          # on (pkg, parent) so the dependency",
+        "                          # chain is visible.",
+        "                          rule_id = f'npm-audit:{pkg}->{via}'",
+        "                          message = f'Transitive vulnerability: {via} (parent) brings {pkg} ({range_}, {severity})'",
+        "                          results.append({",
+        "                              'ruleId': rule_id,",
+        "                              'level': level,",
+        "                              'message': {'text': message},",
+        "                              'locations': [{'physicalLocation': {'artifactLocation': {'uri': 'package.json'}}}],",
+        "                              'properties': {'package': pkg, 'parent': via, 'range': range_, 'severity': severity},",
+        "                          })",
+        "                      elif isinstance(via, dict):",
+        "                          title = via.get('title', '')",
+        "                          url = via.get('url', '')",
+        "                          # Prefer a stable CVE/GHSA id from",
+        "                          # the URL; fall back to title.",
+        "                          stable_id = ''",
+        "                          for src in (url, title):",
+        "                              m = cve_re.search(src) or ghsa_re.search(src)",
+        "                              if m:",
+        "                                  stable_id = m.group(0)",
+        "                                  break",
+        "                          rule_id = stable_id or title or f'npm-audit:{pkg}'",
+        "                          if stable_id:",
+        "                              message = f'{title} in {pkg} {range_} (severity={severity}) — {stable_id}'",
+        "                          else:",
+        "                              message = f'{title or \"Vulnerability\"} in {pkg} {range_} (severity={severity})'",
+        "                          results.append({",
+        "                              'ruleId': rule_id,",
+        "                              'level': level,",
+        "                              'message': {'text': message},",
+        "                              'locations': [{'physicalLocation': {'artifactLocation': {'uri': 'package.json'}}}],",
+        "                              'properties': {",
+        "                                  'package': pkg,",
+        "                                  'range': range_,",
+        "                                  'severity': severity,",
+        "                                  'title': title,",
+        "                                  'url': url,",
+        "                                  'source': via.get('source'),",
+        "                                  'cwe': via.get('cwe', []),",
+        "                                  'cvss_score': via.get('cvss', {}).get('score') if isinstance(via.get('cvss'), dict) else None,",
+        "                              },",
+        "                          })",
         "              sarif = {",
         "                  'version': '2.1.0',",
-        "                  '\\$schema': 'https://json.schemastore.org/sarif-2.1.0.json',",
+        "                  '$schema': 'https://json.schemastore.org/sarif-2.1.0.json',",
         "                  'runs': [{",
         "                      'tool': {'driver': {'name': 'npm audit', 'version': '1.0', 'informationUri': 'https://docs.npmjs.com/cli/v10/commands/npm-audit'}},",
-        "                      'results': results",
-        "                  }]",
+        "                      'results': results,",
+        "                  }],",
         "              }",
         "              with open('npm-audit-results.sarif', 'w') as f:",
         "                  json.dump(sarif, f, indent=2)",
-        "              print(f'npm-audit-results.sarif written with {len(results)} findings')",
+        "              print(f'npm-audit-results.sarif written with {len(results)} findings from {len(vulns)} vulnerable packages')",
         "          except Exception as e:",
         "              print(f'npm-audit SARIF conversion error: {e}', file=sys.stderr)",
         "              import traceback; traceback.print_exc()",
         "              sys.exit(0)",
-        '          "',
+        "          PY_EOF_NPM_AUDIT",
         "        continue-on-error: true",
     ]
 
@@ -3592,10 +3806,14 @@ def _ensure_pip_audit_sarif_conversion() -> list[str]:
 
 
 # ----------------------------------------------------------------------
-# Microservice / multi-service job builders
+# Microservice / multi-service job builders (DISABLED per R2.1)
 # ----------------------------------------------------------------------
-# See struktur-v6 §3.6.1 for the design rationale. The strategy for
-# microservices and modular_monolith repositories is:
+# Arsitektur bukan variabel eksperimen. Monolithic only. Kode di bawah
+# ini TIDAK lagi dipanggil dari runtime path utama. Disimpan untuk
+# backward compatibility.
+#
+# Legacy design rationale (struktur-v6 §3.6.1): for modular_monolith
+# repositories the strategy was:
 #
 #   1. docker-compose-validate (cheap fail-fast gate)
 #   2. dependency-scan-per-service (matrix strategy)
@@ -3763,7 +3981,7 @@ def _build_docker_compose_validate_job() -> tuple[str, str]:
     instead of wasting compute on per-service scanners.
     """
     reason = (
-        "Microservices/modular_monolith architecture with a docker-compose "
+        "docker-compose file present in repository. "
         "file detected. Validates the compose file syntax and service "
         "references via `docker compose config --quiet` so a broken stack "
         "fails fast (within ~30s) before per-service scanners run. The list "
@@ -3840,7 +4058,8 @@ def _build_dependency_scan_per_service_job() -> tuple[str, str]:
         "          scan-ref: '${{ matrix.path }}'",
         "          format: 'sarif'",
         "          output: 'trivy-fs-${{ matrix.service }}.sarif'",
-        "          severity: 'HIGH,CRITICAL'",
+        "          version: v0.72.0",
+        "          severity: 'MEDIUM,HIGH,CRITICAL'",
         "        continue-on-error: true",
         "",
         *_ensure_sarif_fallback(
@@ -3869,7 +4088,7 @@ def _build_dependency_scan_per_service_job() -> tuple[str, str]:
     ]
     matrix_job_yaml = "\n".join(matrix_job_yaml_lines)
     reason = (
-        "Microservices/modular_monolith architecture detected. Enumerates "
+        "Multi-service matrix scan (legacy, disabled per R2.1). Enumerates "
         "service directories (heuristic: first-level sub-directory that "
         "contains a package manager manifest) and runs the appropriate CVE "
         "scanner per service: `npm audit` for npm/yarn/pnpm, `pip-audit` "
@@ -3898,6 +4117,7 @@ def _build_workflow_yaml(
     detected_sub_type: str | None = None,
     llm_rule_suggestions: list[str] | None = None,
     state: PipelineEngineerState | None = None,
+    active_profiles: list | None = None,
 ) -> tuple[str, list[str], list[dict]]:
     """Build the full GitHub Actions workflow YAML deterministically.
 
@@ -3915,6 +4135,13 @@ def _build_workflow_yaml(
         Optional list of custom rule file names suggested by the
         LLM at inference time. Used for emerging threats not yet
         covered by the static mapping in scan_directives.py.
+    active_profiles:
+        Optional list of `LanguageProfile` objects resolved by
+        `language_profiles.resolve_active_profiles`. When non-empty,
+        the `lint` and `test` jobs dispatch over the profile list
+        (one `lint-<id>` / `test-<id>` job per detected language).
+        When empty/None, the original if/elif branches (Node /
+        Python / generic) are used as a backward-compat fallback.
     """
     explanations: list[dict] = []
     stage_names: list[str] = []
@@ -3986,10 +4213,20 @@ def _build_workflow_yaml(
         "jobs:",
     ]
 
-    def _add_job(name: str, body: str, reason: str, status: str = "recommended") -> None:
+    def _add_job(name: str, body: str, reason: str, status: str = "recommended", aliases: list[str] | None = None) -> None:
         yaml_lines.append(f"  {name}:")
         yaml_lines.append(body)
         stage_names.append(name)
+        # Multi-language: when a per-language job (e.g. `lint-python`)
+        # is emitted, also record its generic alias (`lint`) in
+        # `stage_names` so downstream consumers (PDF, coverage library,
+        # security_requirement_inference_node, pipeline_augmentation_node)
+        # which key off `"lint"` / `"test"` continue to work. The
+        # YAML still uses the language-specific job name.
+        if aliases:
+            for alias in aliases:
+                if alias not in stage_names:
+                    stage_names.append(alias)
         explanations.append({
             "name": name,
             "reason": reason,
@@ -4032,155 +4269,164 @@ def _build_workflow_yaml(
 
     # ---- lint ----
     if "lint" in stages:
-        if has_node:
-            tool = "eslint"
-            reason = (
-                f"JavaScript/TypeScript repository detected"
-                f"{' (package manager: ' + package_manager + ')' if package_manager else ''}"
-                f"; ESLint enforces code-quality and style rules."
-            )
-            # For real CI jobs (lint, test, build) we still need
-            # working modules, so we do NOT use --ignore-scripts.
-            # But native modules with broken V8 builds (e.g.
-            # better-sqlite3@7.4.3 on Node 24) should not block the
-            # whole job — we mark the install step as
-            # `continue-on-error: true` so the actual lint/test/build
-            # step (which is the real check) still runs. If install
-            # fails, the lint step will report it as a missing
-            # dependency rather than a workflow failure.
-            #
-            # Reviewer feedback (round 3): defaulting to Node 24 means
-            # every repo with old native modules (better-sqlite3@7.x,
-            # sqlite3, bcrypt, etc.) ends up with a red CI for the
-            # wrong reason. Auto-detect the Node version from
-            # `engines.node` in package.json (capped at Node 20 LTS)
-            # so `lint` / `test` actually run on real-world repos.
-            node_version = _detect_node_version(structure or [], files or {})
-            setup, install_cmd = _node_setup_steps(
-                package_manager, has_lockfile, node_version=node_version
-            )
-            install = (
-                f"      - name: Install dependencies\n"
-                f"        run: {install_cmd}\n"
-                f"        continue-on-error: true"
-            )
-            run_step = (
-                "      - name: Run ESLint\n        run: |\n"
-                "          if [ -f package.json ] && grep -q '\"lint\"' package.json; then\n"
-                "            npm run lint --if-present\n"
-                "          else\n"
-                "            echo 'No lint script defined; skipping.'\n"
-                "          fi"
-            )
-        elif has_python:
-            tool = "ruff"
-            reason = "Python repository detected; Ruff provides fast linting."
-            setup = [
-                "      - name: Set up Python",
-                f"        uses: {_pin('actions/setup-python@v5')}",
-                "        with:",
-                "          python-version: '3.11'",
-                "",
-            ]
-            install = "      - name: Install Ruff\n        run: pip install ruff"
-            run_step = "      - name: Run Ruff\n        run: ruff check . || true"
-        else:
-            tool = "semgrep"
-            reason = "No specialized linter detected; falling back to Semgrep static checks."
-            setup = []
-            install = ""
-            run_step = (
-                "      - name: Run Semgrep (lint ruleset)\n"
-                f"        uses: {_pin('returntocorp/semgrep-action@v1')}\n"
-                "        with:\n"
-                "          config: >-\n"
-                "            p/owasp-top-ten\n"
-                "            p/javascript\n"
-                "            p/nodejs\n"
-                "            p/expressjs\n"
-                "            p/sql-injection\n"
-                "            p/secrets\n"
-                "            p/dockerfile\n"
-                "        continue-on-error: false"
-            )
+        # Multi-language path: emit one `lint-<id>` job per detected
+        # language profile. Falls through to the legacy if/elif chain
+        # if `active_profiles` is empty (e.g. detection failed or
+        # language has no per-lang linter).
+        _lint_jobs_emitted_via_profiles = False
+        if active_profiles:
+            from app.agents.language_profiles import render_lint_jobs
+            _rendered_lint_jobs = render_lint_jobs(active_profiles)
+            if _rendered_lint_jobs:
+                for job_name, job_body, job_reason in _rendered_lint_jobs:
+                    _add_job(job_name, job_body, job_reason, aliases=["lint"])
+                    yaml_lines.append("")
+                _lint_jobs_emitted_via_profiles = True
 
-        body = "\n".join(
-            [
-                "    runs-on: ubuntu-latest",
-                "    timeout-minutes: 15",
-                "    continue-on-error: false",
-                "    steps:",
-                "      - name: Checkout code",
-                f"        uses: {_pin('actions/checkout@v4')}",
-                "        with:",
-                "          persist-credentials: false",
-                "",
-                *setup,
-                *( [install, ""] if install else [] ),
-                run_step,
-            ]
-        )
-        _add_job("lint", body, reason)
-        yaml_lines.append("")  # blank line after job
+        if not _lint_jobs_emitted_via_profiles:
+            # Legacy fallback: single `lint` job from if/elif below.
+            if has_node:
+                tool = "eslint"
+                reason = (
+                    f"JavaScript/TypeScript repository detected"
+                    f"{' (package manager: ' + package_manager + ')' if package_manager else ''}"
+                    f"; ESLint enforces code-quality and style rules."
+                )
+                node_version = _detect_node_version(structure or [], files or {})
+                setup, install_cmd = _node_setup_steps(
+                    package_manager, has_lockfile, node_version=node_version
+                )
+                install = (
+                    f"      - name: Install dependencies\n"
+                    f"        run: {install_cmd}\n"
+                    f"        continue-on-error: true"
+                )
+                run_step = (
+                    "      - name: Run ESLint\n        run: |\n"
+                    "          if [ -f package.json ] && grep -q '\"lint\"' package.json; then\n"
+                    "            npm run lint --if-present\n"
+                    "          else\n"
+                    "            echo 'No lint script defined; skipping.'\n"
+                    "          fi"
+                )
+            elif has_python:
+                tool = "ruff"
+                reason = "Python repository detected; Ruff provides fast linting."
+                setup = [
+                    "      - name: Set up Python",
+                    f"        uses: {_pin('actions/setup-python@v5')}",
+                    "        with:",
+                    "          python-version: '3.11'",
+                    "",
+                ]
+                install = "      - name: Install Ruff\n        run: pip install ruff"
+                run_step = "      - name: Run Ruff\n        run: ruff check . || true"
+            else:
+                tool = "semgrep"
+                reason = "No specialized linter detected; falling back to Semgrep static checks."
+                setup = []
+                install = ""
+                run_step = (
+                    "      - name: Run Semgrep (lint ruleset)\n"
+                    f"        uses: {_pin('returntocorp/semgrep-action@v1')}\n"
+                    "        with:\n"
+                    "          config: >-\n"
+                    "            p/owasp-top-ten\n"
+                    "            p/javascript\n"
+                    "            p/nodejs\n"
+                    "            p/expressjs\n"
+                    "            p/sql-injection\n"
+                    "            p/secrets\n"
+                    "            p/dockerfile\n"
+                    "        continue-on-error: false"
+                )
+
+            body = "\n".join(
+                [
+                    "    runs-on: ubuntu-latest",
+                    "    timeout-minutes: 15",
+                    "    continue-on-error: false",
+                    "    steps:",
+                    "      - name: Checkout code",
+                    f"        uses: {_pin('actions/checkout@v4')}",
+                    "        with:",
+                    "          persist-credentials: false",
+                    "",
+                    *setup,
+                    *( [install, ""] if install else [] ),
+                    run_step,
+                ]
+            )
+            _add_job("lint", body, reason)
+            yaml_lines.append("")
 
     # ---- test ----
     if "test" in stages and test_framework:
-        if has_node:
-            tool = "npm test"
-            reason = f"Test framework '{test_framework}' detected; run unit tests before security scans."
-            # Real CI job — install must not block the whole job
-            # on a broken native module build.
-            #
-            # Use the same Node version detection as `lint` so both
-            # jobs install with a runtime that can actually build
-            # the repo's native modules.
-            node_version = _detect_node_version(structure or [], files or {})
-            setup, install_cmd = _node_setup_steps(
-                package_manager, has_lockfile, node_version=node_version
-            )
-            install = (
-                f"      - name: Install dependencies\n"
-                f"        run: {install_cmd}\n"
-                f"        continue-on-error: true"
-            )
-            run_step = "      - name: Run tests\n        run: npm test --if-present || true"
-        elif has_python:
-            tool = "pytest"
-            reason = f"Test framework '{test_framework}' detected; run Python tests before security scans."
-            setup = [
-                "      - name: Set up Python",
-                f"        uses: {_pin('actions/setup-python@v5')}",
-                "        with:",
-                "          python-version: '3.11'",
-                "",
-            ]
-            install = "      - name: Install dependencies\n        run: pip install -r requirements.txt || pip install -e . || true"
-            run_step = "      - name: Run tests\n        run: pytest || python -m pytest || true"
-        else:
-            tool = test_framework or "test"
-            reason = f"Test framework '{test_framework}' detected."
-            setup = []
-            install = ""
-            run_step = f"      - name: Run {test_framework}\n        run: echo 'Test execution for {test_framework}'"
+        # Multi-language path: emit one `test-<id>` job per detected
+        # language profile. Falls through to the legacy if/elif chain
+        # if `active_profiles` is empty.
+        _test_jobs_emitted_via_profiles = False
+        if active_profiles:
+            from app.agents.language_profiles import render_test_jobs
+            _rendered_test_jobs = render_test_jobs(active_profiles)
+            if _rendered_test_jobs:
+                for job_name, job_body, job_reason in _rendered_test_jobs:
+                    _add_job(job_name, job_body, job_reason, aliases=["test"])
+                    yaml_lines.append("")
+                _test_jobs_emitted_via_profiles = True
 
-        body = "\n".join(
-            [
-                "    runs-on: ubuntu-latest",
-                "    timeout-minutes: 15",
-                "    continue-on-error: false",
-                "    steps:",
-                "      - name: Checkout code",
-                f"        uses: {_pin('actions/checkout@v4')}",
-                "        with:",
-                "          persist-credentials: false",
-                "",
-                *setup,
-                *( [install, ""] if install else [] ),
-                run_step,
-            ]
-        )
-        _add_job("test", body, reason)
-        yaml_lines.append("")
+        if not _test_jobs_emitted_via_profiles:
+            # Legacy fallback: single `test` job from if/elif below.
+            if has_node:
+                tool = "npm test"
+                reason = f"Test framework '{test_framework}' detected; run unit tests before security scans."
+                node_version = _detect_node_version(structure or [], files or {})
+                setup, install_cmd = _node_setup_steps(
+                    package_manager, has_lockfile, node_version=node_version
+                )
+                install = (
+                    f"      - name: Install dependencies\n"
+                    f"        run: {install_cmd}\n"
+                    f"        continue-on-error: true"
+                )
+                run_step = "      - name: Run tests\n        run: npm test --if-present || true"
+            elif has_python:
+                tool = "pytest"
+                reason = f"Test framework '{test_framework}' detected; run Python tests before security scans."
+                setup = [
+                    "      - name: Set up Python",
+                    f"        uses: {_pin('actions/setup-python@v5')}",
+                    "        with:",
+                    "          python-version: '3.11'",
+                    "",
+                ]
+                install = "      - name: Install dependencies\n        run: pip install -r requirements.txt || pip install -e . || true"
+                run_step = "      - name: Run tests\n        run: pytest || python -m pytest || true"
+            else:
+                tool = test_framework or "test"
+                reason = f"Test framework '{test_framework}' detected."
+                setup = []
+                install = ""
+                run_step = f"      - name: Run {test_framework}\n        run: echo 'Test execution for {test_framework}'"
+
+            body = "\n".join(
+                [
+                    "    runs-on: ubuntu-latest",
+                    "    timeout-minutes: 15",
+                    "    continue-on-error: false",
+                    "    steps:",
+                    "      - name: Checkout code",
+                    f"        uses: {_pin('actions/checkout@v4')}",
+                    "        with:",
+                    "          persist-credentials: false",
+                    "",
+                    *setup,
+                    *( [install, ""] if install else [] ),
+                    run_step,
+                ]
+            )
+            _add_job("test", body, reason)
+            yaml_lines.append("")
 
     # ---- sast ----
     if "sast" in stages:
@@ -4209,6 +4455,34 @@ def _build_workflow_yaml(
                 if not c.startswith("/src/.semgrep/")
             ]
         except Exception:
+            registry_configs = []
+
+        # Multi-language: enrich `registry_configs` with rulesets keyed
+        # to the detected language(s). This is the only place that
+        # turns the single `sast` job into a per-language-aware scan:
+        # p/python, p/django, p/fastapi for a Python repo;
+        # p/golang for Go; p/csharp for .NET; p/php + p/laravel for
+        # PHP; etc. Monorepos with multiple languages get the union.
+        # If `build_scan_directives` already produced rules for the
+        # same language (e.g. from a custom domain), the dedup block
+        # below keeps the first-seen ordering.
+        try:
+            from app.agents.language_profiles import semgrep_registry_for_languages
+            lang_rules = semgrep_registry_for_languages(
+                primary_language=primary_language,
+                extra_frameworks=frameworks,
+            )
+            for rule in lang_rules:
+                if rule not in registry_configs:
+                    registry_configs.append(rule)
+        except Exception:
+            # Last-ditch fallback: at least the cross-cutting rulesets
+            # so the SAST job is still meaningful for any language.
+            for rule in ("p/owasp-top-ten", "p/secrets", "p/security-audit"):
+                if rule not in registry_configs:
+                    registry_configs.append(rule)
+
+        if not registry_configs:
             registry_configs = [
                 "p/owasp-top-ten",
                 "p/javascript",
@@ -4255,13 +4529,20 @@ def _build_workflow_yaml(
                 "",
                 f"      - name: Run {tool} (registry + .semgrep/, SARIF output)",
                 "        run: |",
+                "          # Ensure the `.semgrep/` directory exists before running.",
+                "          # The `--config=.semgrep` flag below imports any custom",
+                "          # rules committed by `pull_request_creation_node`; if the",
+                "          # directory is missing, semgrep returns exit 7 (config",
+                "          # error). Create an empty dir so the import is a no-op",
+                "          # rather than a hard failure.",
+                "          mkdir -p .semgrep",
                 "          docker run --rm \\",
                 "            -v \"${{ github.workspace }}:/src\" \\",
                 "            returntocorp/semgrep:1.99.0 \\",
                 "            semgrep ci \\",
                 f"              {all_config_lines} \\",
                 "            --sarif --output=/src/semgrep-results.sarif \\",
-                "            --timeout=600 --no-error --error",
+                "            --timeout=600 --no-suppress-errors",
                 "        continue-on-error: true",
                 "",
                 "      - name: Ensure Semgrep SARIF file exists (fallback for 0 findings or scan error)",
@@ -4361,9 +4642,19 @@ def _build_workflow_yaml(
                     "          scan-ref: '.'",
                     "          format: 'sarif'",
                     "          output: 'trivy-fs-results.sarif'",
-                    "          severity: 'HIGH,CRITICAL'",
+                    # v9.7 — lower severity to MEDIUM so the dependency-scan
+                    # Trivy pass actually surfaces findings in
+                    # repositories that have MODERATE-rated CVEs (the
+                    # majority of npm ecosystem warnings). HIGH,CRITICAL
+                    # only produces 0 results for projects with old
+                    # dependencies, which defeats the purpose of running
+                    # Trivy alongside `npm audit`. Use Trivy as a
+                    # second-opinion scanner that covers any MEDIUM+ CVE
+                    # the lockfile-based Trivy fs scan can find.
+                    "          version: v0.72.0",
+                    "          severity: 'MEDIUM,HIGH,CRITICAL'",
                     "        continue-on-error: true",
-                    "",
+
                     *_ensure_sarif_fallback("trivy-fs-results.sarif", "Trivy"),
 
                     "      - name: Upload Trivy fs SARIF to GitHub Code Scanning",
@@ -4466,7 +4757,8 @@ def _build_workflow_yaml(
                     "          scan-ref: '.'",
                     "          format: 'sarif'",
                     "          output: 'trivy-fs-results.sarif'",
-                    "          severity: 'HIGH,CRITICAL'",
+                    "          version: v0.72.0",
+                    "          severity: 'MEDIUM,HIGH,CRITICAL'",
                     "        continue-on-error: true",
                     "",
                     *_ensure_sarif_fallback("trivy-fs-results.sarif", "Trivy"),
@@ -4540,7 +4832,8 @@ def _build_workflow_yaml(
                     "          scan-ref: '.'",
                     "          format: 'sarif'",
                     "          output: 'trivy-fs-results.sarif'",
-                    "          severity: 'HIGH,CRITICAL'",
+                    "          version: v0.72.0",
+                    "          severity: 'MEDIUM,HIGH,CRITICAL'",
                     "        continue-on-error: true",
                     "",
                     *_ensure_sarif_fallback("trivy-fs-results.sarif", "Trivy"),
@@ -4802,6 +5095,7 @@ def _build_workflow_yaml(
                 "          image-ref: 'app:ci-${{ github.sha }}'",
                 "          format: 'sarif'",
                 "          output: 'trivy-image-results.sarif'",
+                "          version: v0.72.0",
                 "          severity: 'HIGH,CRITICAL'",
                 "        continue-on-error: true",
                 "",
@@ -4880,7 +5174,19 @@ def _build_workflow_yaml(
     # _build_workflow_yaml that only care about the static job
     # shapes). Use a safe fallback so the function still works.
     _state = state if state is not None else {}
-    for design in (_state.get("job_designs") or []):
+    # Custom-jobs gate. Skip the LLM-designed jobs when:
+    #   1. `state["general_only"]` is True (operator toggled the
+    #      `AI_DEVSECOPS_GENERAL_ONLY` env var).
+    #   2. Domain confidence is below 0.5 (heuristic veto fell back
+    #      to "general" because the LLM classifier over-fit on a
+    #      weak signal — e.g. a healthcare billing repo got
+    #      misclassified as e-commerce).
+    # The standard jobs above (lint, test, sast, secret-scan,
+    # dependency-scan, container-scan) are still emitted.
+    _skip_custom_jobs = bool(_state.get("general_only")) or (
+        (domain_confidence or 0.0) < 0.5
+    )
+    for design in (_state.get("job_designs") or []) if not _skip_custom_jobs else []:
         if not isinstance(design, dict):
             continue
         design_name = design.get("name", "").strip()
@@ -4988,13 +5294,45 @@ def _build_ai_job_from_design(
 
     continue_on_error = bool(config.get("continue_on_error", True))
     timeout_minutes = int(config.get("timeout_minutes", 10))
-    needs_list = config.get("needs") or ["sast"]
-    if not isinstance(needs_list, list):
-        needs_list = ["sast"]
+    # Default to no `needs:`. AI-generated jobs are emitted into
+    # `ai-devsecops-custom.yml` (a `workflow_call` reusable file)
+    # which has no `sast` sibling — emitting `needs: [sast]` there
+    # makes GitHub reject the file with
+    #   "must contain at least one job with no dependencies".
+    # Callers may opt in via `config["needs"]`, but we drop any
+    # reference to a job that does not exist in the *reusable* file
+    # (lint, test, sast, secret-scan, dep-check, container-scan,
+    # build all live in the generic file and are not visible inside
+    # the custom file's `jobs:` block). Only intra-custom needs
+    # (between AI jobs in the same file) would be safe to keep, but
+    # the current designs never request that, so the safest
+    # behaviour is to always omit `needs:` for AI jobs.
+    if "needs" in config:
+        needs_list = config.get("needs")
+        if not isinstance(needs_list, list):
+            needs_list = []
+        # Filter out any reference to a generic-only job.
+        # AI-generated jobs in the custom file have no safe `needs:`
+        # target — drop the dependency entirely so the file remains
+        # valid as a `workflow_call` reusable workflow.
+        needs_list = []
+    else:
+        needs_list = []
 
     steps: list[str] = []
     sarif_categories: list[str] = []
     has_sarif = False
+    # Pre-compute the SARIF category (if any) so that shell_check
+    # wrappers can write their log to a file whose name matches the
+    # category the conversion step expects. Without this, the
+    # `tee` target and the `log_path` in the python step would use
+    # different names and the conversion would silently find 0
+    # findings.
+    pre_category = None
+    for _a in actions:
+        if isinstance(_a, dict) and _a.get("type") == "sarif_upload":
+            pre_category = _a.get("category") or coverage or name
+            break
     for idx, action in enumerate(actions):
         if not isinstance(action, dict):
             continue
@@ -5003,10 +5341,83 @@ def _build_ai_job_from_design(
 
         if atype == "shell_check":
             script = action.get("script") or "echo 'no-op'"
+            # Wrap the script in a subshell that:
+            #   1. Captures all output to a per-job log file
+            #      (`${log_file}`) via `tee -a`, so the
+            #      `_ensure_sarif_from_annotations` step can parse
+            #      `::error` / `::warning` annotations and convert
+            #      them to SARIF results.
+            #   2. **Traps any non-zero exit and emits a synthetic
+            #      `::error` annotation** so even if the script
+            #      aborts early (e.g. `grep | wc -l` exits 1 under
+            #      `set -e -o pipefail` and stops the script before
+            #      it can `echo '::error::...'`) the SARIF
+            #      conversion still produces a finding.
+            #      Without this guard, buggy LLM-generated scripts
+            #      can abort without emitting any annotations, and
+            #      the SARIF ends up empty.
+            #   3. Preserves the original script's exit code so the
+            #      job still shows as `failure` (which is the
+            #      intended UX — a failing security job is a
+            #      finding).
+            #
+            # The original script body is unchanged (no fragile
+            # `{ ... } | tee` wrapper) so bash quote parsing inside
+            # single-quoted regex character classes (e.g.
+            # `[\"\\']`) is not affected.
+            log_file = f"{pre_category or name or 'ai-job'}.shell_log"
+            script_lines = script.splitlines()
+            # Normalise: drop any leading `set -e` / `set -o pipefail`
+            # in the script because we wrap the whole thing in a
+            # subshell with our own error handling. This avoids the
+            # `grep | wc -l` exit-1 bug under `pipefail` aborting the
+            # script before it can emit `::error` annotations.
+            cleaned_lines = []
+            for ln in script_lines:
+                stripped = ln.strip()
+                if (
+                    stripped == "set -e"
+                    or stripped == "set -euo pipefail"
+                    or stripped == "set -o pipefail"
+                    or stripped == "set -eu"
+                    or stripped == "set -e -o pipefail"
+                    or stripped == "set -eo pipefail"
+                ):
+                    # Drop the line; we handle errors in the wrapper.
+                    continue
+                cleaned_lines.append(ln)
+            # Build the wrapped script:
+            #   1. `exec > >(tee -a log) 2>&1` captures output.
+            #   2. `( set +e; <original script> )` runs the script in
+            #      a subshell with `set +e` so internal command
+            #      failures don't abort before `echo ::error` runs.
+            #   3. The subshell's exit code is captured, and if
+            #      non-zero AND the log file has no annotations yet,
+            #      we emit a synthetic `::error` so the SARIF
+            #      conversion always has something to work with.
+            wrapped_lines = [
+                f"# Set up output capture for the annotation-to-SARIF step.",
+                f"exec > >(tee -a {log_file}) 2>&1",
+                f"# Run the original script in a subshell with set +e so",
+                f"# that any single command failure does not abort the",
+                f"# script before it can emit a '::error' annotation.",
+                f"inner_exit=0",
+                f"( set +e",
+                *cleaned_lines,
+                f") || inner_exit=$?",
+                f"# If the inner script exited non-zero and emitted no",
+                f"# '::error'/'::warning' annotation, synthesise one so the",
+                f"# SARIF conversion step still has a finding to record.",
+                f"if [ \"$inner_exit\" -ne 0 ] && ! grep -qE '^::(error|warning)' {log_file}; then",
+                f"  echo \"::error file={step_name}::shell check failed (exit code $inner_exit) — see run log for details\"",
+                f"fi",
+                f"exit $inner_exit",
+            ]
+            inner = "\n".join("          " + ln for ln in wrapped_lines)
             steps.append(
                 f"      - name: {step_name}\n"
                 f"        run: |\n"
-                + "\n".join(f"          {ln}" for ln in script.splitlines())
+                f"{inner}\n"
             )
         elif atype == "python_script":
             script = action.get("script") or "print('no-op')"
@@ -5045,8 +5456,23 @@ def _build_ai_job_from_design(
         # file even when the upstream check produced no findings.
         cat = sarif_categories[0]
         sarif_file = f"{cat}-results.sarif"
+        # 1) Convert ::error/::warning annotations emitted by the
+        #    upstream shell_check steps into real SARIF results. This
+        #    is what makes AI-generated security jobs surface
+        #    findings in the GitHub Code Scanning tab (otherwise the
+        #    fallback SARIF is empty and alerts only appear in the
+        #    run log, invisible to the Security tab).
+        for line in _ensure_sarif_from_annotations(
+            sarif_file, cat, rule_id_prefix=f"ai-devsecops-{cat}"
+        ):
+            steps.append(line)
+        # 2) Fallback: if no scanner produced any SARIF (and the
+        #    annotation step also produced nothing), make sure the
+        #    file still exists so upload-sarif does not fail with
+        #    "Path does not exist".
         for line in _ensure_sarif_fallback(sarif_file, cat):
             steps.append(line)
+        # 3) Upload to GitHub Code Scanning.
         steps.append(
             f"      - name: Upload {cat} SARIF to GitHub Code Scanning\n"
             f"        if: always()\n"
@@ -5059,20 +5485,35 @@ def _build_ai_job_from_design(
     if not steps:
         return "", ""
 
-    needs_yaml = ", ".join(needs_list)
+    # AI-generated jobs end up in `ai-devsecops-custom.yml` (a
+    # `workflow_call` reusable file) via `build_workflow_yaml_split`.
+    # Referencing `needs: [sast]` there is invalid: the reusable
+    # file has no `sast` job, so GitHub rejects the whole file
+    # with "must contain at least one job with no dependencies".
+    # Only emit `needs:` when caller explicitly opted in via
+    # config (or the legacy default, kept for the merged single-
+    # file variant where `sast` does exist as a sibling job).
+    if needs_list:
+        needs_yaml = ", ".join(needs_list)
+        needs_line = f"    needs: [{needs_yaml}]"
+    else:
+        needs_line = None
     reason_text = reasoning[:400]
     body_lines = [
         "    runs-on: ubuntu-latest",
         f"    timeout-minutes: {timeout_minutes}",
         f"    continue-on-error: {'true' if continue_on_error else 'false'}",
-        f"    needs: [{needs_yaml}]",
+    ]
+    if needs_line:
+        body_lines.append(needs_line)
+    body_lines.extend([
         "    steps:",
         "      - name: Checkout code",
         f"        uses: {_pin('actions/checkout@v4')}",
         "        with:",
         "          persist-credentials: false",
         "",
-    ]
+    ])
     body_lines.extend(steps)
     body = "\n".join(body_lines)
     return body, (
@@ -5347,7 +5788,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload CVE results
         uses: github/codeql-action/upload-sarif@v3
@@ -5383,7 +5824,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-npm-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload npm CVE results
         uses: github/codeql-action/upload-sarif@v3
@@ -5418,7 +5859,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-python-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload Python CVE results
         uses: github/codeql-action/upload-sarif@v3
@@ -5453,7 +5894,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-rust-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload Rust CVE results
         uses: github/codeql-action/upload-sarif@v3
@@ -5482,7 +5923,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-java-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
           scan-run-evidence: true
       
       - name: Upload Java CVE results
@@ -5506,7 +5947,7 @@ def _inject_cve_jobs(yaml_str: str, technologies: dict, arch_type: str = "monoli
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-cve-results.sarif'
-          severity: 'HIGH,CRITICAL'
+                    severity: 'HIGH,CRITICAL'
       
       - name: Upload CVE results
         uses: github/codeql-action/upload-sarif@v3

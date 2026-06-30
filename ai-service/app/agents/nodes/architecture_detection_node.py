@@ -7,13 +7,15 @@ from app.agents.llm_response_parser import parse_llm_json_object
 
 ARCHITECTURE_DETECTION_PROMPT = """You are a DevSecOps engineer analyzing application architecture.
 
-The supported architectures have been reduced to TWO (skripsi Bab 3, revisi 3-domain & 2-architecture):
-- "monolithic"       (single deployable app, all layers in one process)
-- "modular_monolith" (FE/BE split OR multiple modules deployed together
-                      with shared database — also called frontend_backend)
+The supported architecture is ONE (skripsi Bab 3, revisi 3-domain & 1-architecture):
+- "monolithic" (single deployable app, all layers in one process, includes
+                FE/BE split and modular monolith variants — all collapse to
+                a single deploy unit in CI/CD)
 
-DO NOT return "microservices", "serverless", or "library". Map every
-repository into ONE of the two values above.
+DO NOT return "modular_monolith", "microservices", "serverless", or "library".
+ALWAYS return "monolithic" for any repository — the focus of this research is
+domain-aware variation, not architecture variation. Arsitektur bukan variabel
+eksperimen per batasan B7.
 
 Given the repository structure and detected technologies, determine the
 application architecture with confidence scores.
@@ -25,21 +27,16 @@ Detected technologies:
 {technologies}
 
 Analyze the architecture and return JSON with:
-- architecture_type: one of "monolithic", "modular_monolith"
+- architecture_type: MUST be "monolithic"
 - architecture_confidence: confidence score 0.0-1.0 based on evidence
 - architecture_reason: explanation of why this architecture was chosen
 - service_count: number of distinct services/applications detected (integer, null if unknown)
-- service_names: list of service names if modular_monolith detected, null otherwise
+- service_names: list of service names (informational only, always null since arch is monolithic)
 - has_api_gateway: boolean
 - has_message_queue: boolean
 - has_database_config: boolean
 - is_containerized: boolean
 - has_shared_libraries: boolean (true if multiple services share common libraries/packages)
-
-Key distinction for modular_monolith:
-- Multiple services/directories exist but share database or are deployed together
-- Example: backend/api + frontend + worker all in one repo with shared DB
-- Single deploy unit, NO service mesh, NO independent deployment
 
 Return ONLY valid JSON. No markdown.
 """
@@ -81,13 +78,11 @@ def architecture_detection_node(state: PipelineEngineerState) -> PipelineEnginee
         architecture.setdefault("service_names", [])
 
         state["detected_architecture"] = architecture
+        # Normalise: ALL architecture values collapse to "monolithic".
+        # Arsitektur bukan variabel eksperimen per batasan B7.
+        # Fokus variasi ada di domain (R2.2).
         raw_arch = architecture.get("architecture_type", "monolithic")
-        # Normalise: frontend_backend and any other variants collapse
-        # into modular_monolith (one of the two supported arch types).
-        if raw_arch in ("modular_monolith", "frontend_backend"):
-            normalized_arch = "modular_monolith"
-        else:
-            normalized_arch = "monolithic"
+        normalized_arch = "monolithic"
         state["detected_architecture_type"] = normalized_arch
 
         state["detected_architecture_confidence"] = architecture.get("architecture_confidence", 0.8)

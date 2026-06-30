@@ -31,6 +31,7 @@ class Settings:
     )
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o")
+    LLM_REQUEST_TIMEOUT: int = int(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
 
     # LangChain / LangSmith
     LANGCHAIN_TRACING_V2: bool = (

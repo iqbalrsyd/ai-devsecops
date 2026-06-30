@@ -48,20 +48,46 @@ JOB_REASONING_PROMPT = """You are a senior DevSecOps Pipeline Architect.
 Analyse the repository's source code and design custom CI/CD pipeline
 jobs that are SPECIFIC to the codebase — not generic domain templates.
 
-## SCOPE (skripsi Bab 3, revisi 3-domain & 2-architecture)
+## SCOPE (skripsi Bab 3, revisi 3-domain & 1-architecture)
 
 Supported domains: e-commerce, blog, iot (+ general fallback).
-Supported architectures: monolithic, modular_monolith (FE/BE split).
-DO NOT invent custom jobs for unsupported domains such as healthcare,
-fintech, education, or microservices. Map the repository to one of
-the three supported domains and stay within that scope.
+Supported architectures: monolithic (saja).
+Arsitektur bukan variabel eksperimen (batasan B7).
+
+## Custom jobs are driven by BUSINESS FEATURES, not by domain label
+
+The domain label (e-commerce / blog / iot / general) is a NAME for
+documentation purposes. The actual job design MUST be driven by the
+business features and applicable security coverages you can SEE in
+the source code. Concretely:
+
+  - If the repository uses payment APIs (Stripe, Midtrans, Xendit,
+    PayPal, Braintree, etc.) — design `payment_security` jobs even
+    if the domain label is healthcare.
+  - If the repository handles patient records, FHIR resources, or
+    ICD-10 codes — design `authentication_security` /
+    `data_security` jobs (HIPAA-specific templates are NOT emitted
+    because they are out of scope, but auth + data security covers
+    the same surface).
+  - If the repository publishes markdown / blog posts / comments —
+    design `cms_security` jobs.
+  - If the repository talks to MQTT brokers or ships firmware —
+    design `iot_security` jobs.
+  - If the repository does plain CRUD with no business-feature
+    signal — emit no custom jobs (return `job_designs: []`).
+
+The custom job NAME should describe the business feature / coverage,
+NOT the domain. Use prefixes like `payment-`, `cms-`, `auth-`,
+`data-`, `iot-`, `container-` instead of `ecommerce-`, `blog-`,
+`healthcare-`, etc. This keeps the generated jobs reusable across
+domains.
 
 ## Repository Context
 
 Language: {language}
 Frameworks: {frameworks}
 Architecture: {architecture}
-Domain: {domain}
+Domain: {domain}                ← informational only, do NOT key off this
 Sub-type: {sub_type}
 Deployment: {deployment}
 
@@ -100,6 +126,13 @@ For each custom job you decide to create:
      Code Scanning.
   4. Cite at least one finding OR source pattern in the `reasoning`
      field — be specific.
+  5. Name the job using the coverage / business feature, NOT the
+     domain. Use kebab-case, ≤ 40 chars. Examples:
+     - `payment-stripe-webhook-verify`   (NOT `ecommerce-stripe-...`)
+     - `auth-weak-jwt-secret`            (applies to any repo with JWT)
+     - `cms-markdown-xss`                (applies to blog or healthcare-blog)
+     - `data-sql-injection`              (applies to any repo with SQL)
+     - `iot-mqtt-tls-required`           (only when MQTT is present)
 
 Action types you can use (one per action):
   - `shell_check`         : a `run:` script that exits non-zero on bad pattern
@@ -116,9 +149,9 @@ Action types you can use (one per action):
 - If the repo has no clear custom-job-worthy pattern, return
   `job_designs: []` — empty is a valid answer.
 - Maximum 3 job designs per run (focus on the highest-risk coverage).
-- DO NOT design jobs specific to healthcare (PHI/HIPAA/FHIR),
-  fintech (ledger/transfer), education (LMS/SCORM), or pure
-  microservices. Those domains are out of scope.
+- DO NOT use the domain label in the job name. The same job can
+  apply across domains (e.g. `payment-stripe-webhook-verify` is
+  valid for an e-commerce shop OR a healthcare billing service).
 
 ## Return ONLY valid JSON
 
@@ -141,8 +174,7 @@ Action types you can use (one per action):
       ],
       "configuration": {{
         "continue_on_error": true,
-        "timeout_minutes": 10,
-        "needs": ["sast"]
+        "timeout_minutes": 10
       }}
     }}
   ]
@@ -492,6 +524,120 @@ _DOMAIN_TEMPLATE_DESIGNS: dict[str, list[dict]] = {
                 "needs": ["sast"],
             },
         },
+        {
+            "name": "ecommerce-pci-card-data-no-logging",
+            "coverage": "payment_security",
+            "reasoning": (
+                "PCI DSS Req 3.2: nomor kartu kredit (PAN) tidak boleh di-log, "
+                "di-print, atau di-store dalam bentuk cleartext. Cek console.log, "
+                "logger.info, atau storage yang menerima req.body.card / pan."
+            ),
+            "actions": [
+                {
+                    "type": "shell_check",
+                    "name": "scan-pci-card-data-leak",
+                    "script": (
+                        "set -e\nfail=0\n"
+                        "# Detect card-like fields passed to loggers or stored in plaintext\n"
+                        "if grep -rnE '(console\\.log|logger\\.(info|debug|warn)|winston\\.log)\\s*\\([^)]*(card[_-]?number|pan|cvv|cvc)' src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/payments/log.ts::Card data (PAN/CVV) passed to logger — strip before logging (PCI DSS 3.2)'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "# Detect card number variable in plain-text storage (localStorage, plaintext write)\n"
+                        "if grep -rnE \"localStorage\\.setItem\\s*\\(\\s*[\\\"'][^\\\"']*(card|pan)\" src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/checkout/cart.ts::Card data persisted to localStorage — never store PAN client-side'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "exit $fail\n"
+                    ),
+                },
+                {
+                    "type": "sarif_upload",
+                    "category": "ecommerce-pci-card-logging",
+                },
+            ],
+            "configuration": {
+                "continue_on_error": True,
+                "timeout_minutes": 10,
+                "needs": ["sast"],
+            },
+        },
+        {
+            "name": "ecommerce-inventory-race-condition",
+            "coverage": "api_security",
+            "reasoning": (
+                "Stock decrement tanpa atomic operation (SELECT FOR UPDATE / "
+                "findOneAndUpdate dengan kondisi stock > 0) rentan race "
+                "condition. Dua request paralel bisa menjual 1 barang yang sama "
+                "berkali-kali. Target src/routes/checkout.js dan order placement."
+            ),
+            "actions": [
+                {
+                    "type": "shell_check",
+                    "name": "scan-inventory-atomic-decrement",
+                    "script": (
+                        "set -e\nfail=0\n"
+                        "# Look for naive stock update without guard\n"
+                        "if grep -rnE 'product\\.stock\\s*[-]=' src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/services/inventory.ts::Stock decremented without atomic guard — use Product.findOneAndUpdate({stock:{$gt:0}}, {$inc:{stock:-1}})'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "# Look for read-then-write pattern (TOCTOU)\n"
+                        "if grep -rnE 'await\\s+Product\\.findById.*\\n.*\\.stock' src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/routes/checkout.js::Read-then-write stock check detected — race condition (CWE-367)'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "exit $fail\n"
+                    ),
+                },
+                {
+                    "type": "sarif_upload",
+                    "category": "ecommerce-inventory-race",
+                },
+            ],
+            "configuration": {
+                "continue_on_error": True,
+                "timeout_minutes": 10,
+                "needs": ["sast"],
+            },
+        },
+        {
+            "name": "ecommerce-refund-idor-protection",
+            "coverage": "api_security",
+            "reasoning": (
+                "Endpoint POST /refund/:orderId dan POST /order/:id/cancel "
+                "harus verify ownership dan status order (paid). Tanpa itu, "
+                "attacker bisa refund order orang lain atau cancel pesanan "
+                "lawan. Target src/routes/refund.js dan order cancellation."
+            ),
+            "actions": [
+                {
+                    "type": "shell_check",
+                    "name": "scan-refund-ownership",
+                    "script": (
+                        "set -e\nfail=0\n"
+                        "for route in refund cancel order; do\n"
+                        "  if grep -rnE \"router\\.(post|put|delete)\\s*\\(\\s*['\\\"]\\/?$route\\/:id\" src/ 2>/dev/null | grep -q .; then\n"
+                        "    if ! grep -rnE '(req\\.user\\.id|order\\.userId|verifyOwner|checkOwnership)' src/routes/ 2>/dev/null | grep -q .; then\n"
+                        "      echo \"::error file=src/routes/$route.js::$route/:id endpoint missing ownership check — IDOR allows refund/cancel of other users' orders\"\n"
+                        "      fail=1\n"
+                        "    fi\n"
+                        "  fi\n"
+                        "done\n"
+                        "exit $fail\n"
+                    ),
+                },
+                {
+                    "type": "sarif_upload",
+                    "category": "ecommerce-refund-idor",
+                },
+            ],
+            "configuration": {
+                "continue_on_error": True,
+                "timeout_minutes": 10,
+                "needs": ["sast"],
+            },
+        },
     ],
     "blog": [
         {
@@ -596,6 +742,121 @@ _DOMAIN_TEMPLATE_DESIGNS: dict[str, list[dict]] = {
                 "needs": ["sast"],
             },
         },
+        {
+            "name": "blog-multer-upload-hardening",
+            "coverage": "file_upload_security",
+            "reasoning": (
+                "Endpoint /upload (avatar, post image) rentan RCE dan DoS "
+                "jika tidak ada filter tipe file, validasi MIME, dan size "
+                "limit. Cek multer usage: harus pakai fileFilter, limits."
+                "fileSize, dan storage yang tidak mengeksekusi upload."
+            ),
+            "actions": [
+                {
+                    "type": "shell_check",
+                    "name": "scan-multer-config",
+                    "script": (
+                        "set -e\nfail=0\n"
+                        "# Check multer config: fileFilter present\n"
+                        "if grep -rnE \"multer\\s*\\(\" src/ 2>/dev/null | grep -q .; then\n"
+                        "  if ! grep -rnE 'fileFilter' src/ 2>/dev/null | grep -q .; then\n"
+                        "    echo '::error file=src/middleware/upload.js::multer() missing fileFilter — accepts any file type, risk of RCE via polyglot file'\n"
+                        "    fail=1\n"
+                        "  fi\n"
+                        "  # Check size limit\n"
+                        "  if ! grep -rnE 'limits.*fileSize' src/ 2>/dev/null | grep -q .; then\n"
+                        "    echo '::warning file=src/middleware/upload.js::multer() missing limits.fileSize — no DoS protection on large uploads'\n"
+                        "    fail=1\n"
+                        "  fi\n"
+                        "fi\n"
+                        "exit $fail\n"
+                    ),
+                },
+                {
+                    "type": "sarif_upload",
+                    "category": "blog-multer-hardening",
+                },
+            ],
+            "configuration": {
+                "continue_on_error": True,
+                "timeout_minutes": 10,
+                "needs": ["sast"],
+            },
+        },
+        {
+            "name": "blog-jwt-auth-hardening",
+            "coverage": "authentication",
+            "reasoning": (
+                "JWT secret harus loaded dari env, di-sign dengan algoritma "
+                "yang kuat (RS256/HS256 dengan secret >= 32 char), dan "
+                "memvalidasi exp/aud. Cek jsonwebtoken.sign dan jwt.verify."
+            ),
+            "actions": [
+                {
+                    "type": "shell_check",
+                    "name": "scan-jwt-weak-secret",
+                    "script": (
+                        "set -e\nfail=0\n"
+                        "# JWT secret must come from env, not literal.\n"
+                        "# Use a double-quoted bash string so the regex\n"
+                        # character class can contain both \" and ' without\n"
+                        # bash escape ambiguity.\n"
+                        "if grep -rnE \"jwt\\.sign\\s*\\([^,]+,\\s*[\\\"'][A-Za-z0-9]{1,31}[\\\"']\" src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/auth/jwt.ts::JWT signed with short/hardcoded secret'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "# 'none' algorithm forbidden\n"
+                        "if grep -rnE 'algorithm.*none|algorithms.*\\[.*none' src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/auth/jwt.ts::JWT verify accepts alg=none — algorithm confusion attack (CVE-2015-9235)'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "exit $fail\n"
+                    ),
+                },
+                {
+                    "type": "sarif_upload",
+                    "category": "blog-jwt-hardening",
+                },
+            ],
+            "configuration": {
+                "continue_on_error": True,
+                "timeout_minutes": 10,
+                "needs": ["sast"],
+            },
+        },
+        {
+            "name": "blog-open-redirect-prevention",
+            "coverage": "cms_security",
+            "reasoning": (
+                "Login redirect (?next=, ?returnTo=) rawan open-redirect "
+                "yang dipakai untuk phishing. Cek res.redirect(req.query.next) "
+                "tanpa whitelist host."
+            ),
+            "actions": [
+                {
+                    "type": "shell_check",
+                    "name": "scan-open-redirect",
+                    "script": (
+                        "set -e\nfail=0\n"
+                        "# Look for direct res.redirect(req.query.*) without validation\n"
+                        "if grep -rnE 'res\\.redirect\\s*\\(\\s*req\\.query\\.(next|returnTo|redirect|url)' src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/routes/auth.js::res.redirect uses unvalidated user input — open-redirect phishing vector (CWE-601)'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "exit $fail\n"
+                    ),
+                },
+                {
+                    "type": "sarif_upload",
+                    "category": "blog-open-redirect",
+                },
+            ],
+            "configuration": {
+                "continue_on_error": True,
+                "timeout_minutes": 10,
+                "needs": ["sast"],
+            },
+        },
     ],
     "iot": [
         {
@@ -613,7 +874,7 @@ _DOMAIN_TEMPLATE_DESIGNS: dict[str, list[dict]] = {
                     "script": (
                         "set -e\nfail=0\n"
                         "# Find mqtt.connect('mqtt://...') without TLS\n"
-                        "if grep -rnE 'mqtt\\.connect\\s*\\(\\s*[\"\\']mqtt://' src/ 2>/dev/null | grep -q .; then\n"
+                        "if grep -rnE \"mqtt\\.connect\\s*\\(\\s*[\\\"']mqtt://\" src/ 2>/dev/null | grep -q .; then\n"
                         "  echo '::error file=src/iot/mqtt-client.js::MQTT broker connected over cleartext (mqtt://) — use mqtts://port 8883'\n"
                         "  fail=1\n"
                         "fi\n"
@@ -650,11 +911,11 @@ _DOMAIN_TEMPLATE_DESIGNS: dict[str, list[dict]] = {
                     "script": (
                         "set -e\nfail=0\n"
                         "# Look for default credential patterns\n"
-                        "if grep -rnE '[\"\\']admin[\"\\']\\s*:\\s*[\"\\']admin[\"\\']' src/ 2>/dev/null | grep -q .; then\n"
+                        "if grep -rnE \"[\\\"']admin[\\\"']\\s*:\\s*[\\\"']admin[\\\"']\" src/ 2>/dev/null | grep -q .; then\n"
                         "  echo '::error file=src/iot/provision.ts::Default admin/admin credentials hardcoded — load from secure provisioning'\n"
                         "  fail=1\n"
                         "fi\n"
-                        "if grep -rnE '[\"\\']device[\"\\']\\s*:\\s*[\"\\']1234[\"\\']' src/ 2>/dev/null | grep -q .; then\n"
+                        "if grep -rnE \"[\\\"']device[\\\"']\\s*:\\s*[\\\"']1234[\\\"']\" src/ 2>/dev/null | grep -q .; then\n"
                         "  echo '::error file=src/iot/provision.ts::Default device/1234 credentials hardcoded — use per-device certs'\n"
                         "  fail=1\n"
                         "fi\n"
@@ -692,7 +953,7 @@ _DOMAIN_TEMPLATE_DESIGNS: dict[str, list[dict]] = {
                         "  fail=1\n"
                         "fi\n"
                         "# Check for HTTP (not HTTPS) firmware download\n"
-                        "if grep -rnE 'fetch\\s*\\(\\s*[\"\\']http://' src/iot/firmware 2>/dev/null | grep -q .; then\n"
+                        "if grep -rnE \"fetch\\s*\\(\\s*[\\\"']http://\" src/iot/firmware 2>/dev/null | grep -q .; then\n"
                         "  echo '::error file=src/iot/firmware/update.ts::Firmware downloaded over HTTP — use HTTPS only'\n"
                         "  fail=1\n"
                         "fi\n"
@@ -702,6 +963,123 @@ _DOMAIN_TEMPLATE_DESIGNS: dict[str, list[dict]] = {
                 {
                     "type": "sarif_upload",
                     "category": "iot-firmware-update",
+                },
+            ],
+            "configuration": {
+                "continue_on_error": True,
+                "timeout_minutes": 10,
+                "needs": ["sast"],
+            },
+        },
+        {
+            "name": "iot-telemetry-encryption",
+            "coverage": "iot_security",
+            "reasoning": (
+                "Telemetry data yang dikirim device ke cloud harus di-encrypt "
+                "in transit (TLS, mqtts) dan sensor payload tidak boleh "
+                "berisi PII atau credential cleartext. Cek publisher.publish() "
+                "dan emit pattern untuk field sensitif."
+            ),
+            "actions": [
+                {
+                    "type": "shell_check",
+                    "name": "scan-telemetry-pii",
+                    "script": (
+                        "set -e\nfail=0\n"
+                        "# Check for PII fields in published payloads\n"
+                        "if grep -rnE 'publish\\s*\\([^)]*(ssn|nik|phone|email|password|token)' src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/iot/telemetry.ts::Telemetry payload contains PII/credential fields — strip or encrypt before publish'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "# Check that telemetry uses TLS port (8883/443) not 1883\n"
+                        "if grep -rnE \"publish\\s*\\(\\s*['\\\"][^'\\\"]*://[^:]*:1883\" src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/iot/telemetry.ts::Telemetry published to port 1883 (cleartext MQTT) — use mqtts://port 8883'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "exit $fail\n"
+                    ),
+                },
+                {
+                    "type": "sarif_upload",
+                    "category": "iot-telemetry-encryption",
+                },
+            ],
+            "configuration": {
+                "continue_on_error": True,
+                "timeout_minutes": 10,
+                "needs": ["sast"],
+            },
+        },
+        {
+            "name": "iot-command-injection-device",
+            "coverage": "iot_security",
+            "reasoning": (
+                "Device command handler (shell exec, system call) rentan "
+                "command injection jika input dari user (deviceId, firmwarePath, "
+                "configName) di-interpolate langsung. OWASP IoT Top 10 #1. "
+                "Cek child_process.exec, os.system, dan subprocess shell=True."
+            ),
+            "actions": [
+                {
+                    "type": "shell_check",
+                    "name": "scan-device-cmd-injection",
+                    "script": (
+                        "set -e\nfail=0\n"
+                        "# child_process.exec with template literal / concat\n"
+                        "if grep -rnE 'child_process\\.(exec|execSync)\\s*\\(\\s*[`\\\"][^`\\\"]*\\$\\{' src/iot 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/iot/command.ts::child_process.exec uses template interpolation — command injection (CWE-78)'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "# os.system / subprocess with shell=True and user input\n"
+                        "if grep -rnE '(os\\.system|subprocess\\.call).*shell\\s*=\\s*True' src/iot 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/iot/command.ts::subprocess call with shell=True — vulnerable to command injection'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "exit $fail\n"
+                    ),
+                },
+                {
+                    "type": "sarif_upload",
+                    "category": "iot-command-injection",
+                },
+            ],
+            "configuration": {
+                "continue_on_error": True,
+                "timeout_minutes": 10,
+                "needs": ["sast"],
+            },
+        },
+        {
+            "name": "iot-device-cert-rotation",
+            "coverage": "iot_security",
+            "reasoning": (
+                "Device certificate / token tidak boleh hardcoded dan harus "
+                "di-rotate. Cek long-lived static API key, sertifikat yang "
+                "tidak ada expiry check, dan private key yang ter-commit. "
+                "OWASP IoT Top 10 #2 — insecure network services."
+            ),
+            "actions": [
+                {
+                    "type": "shell_check",
+                    "name": "scan-cert-hardcoded",
+                    "script": (
+                        "set -e\nfail=0\n"
+                        # PEM private key in source
+                        "if grep -rnE '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' src/ 2>/dev/null | grep -q .; then\n"
+                        "  echo '::error file=src/iot/cert.ts::Private key embedded in source — use cert pinning + secure element, never commit keys'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        # long-lived static token (>= 40 char literal)
+                        "if grep -rnE \"[\\\"'][A-Za-z0-9_-]{40,}[\\\"']\" src/iot 2>/dev/null | grep -q .; then\n"
+                        "  echo '::warning file=src/iot/device.ts::Long-lived static token literal detected — use short-lived JWT or cert with rotation'\n"
+                        "  fail=1\n"
+                        "fi\n"
+                        "exit $fail\n"
+                    ),
+                },
+                {
+                    "type": "sarif_upload",
+                    "category": "iot-cert-rotation",
                 },
             ],
             "configuration": {
@@ -801,10 +1179,10 @@ def job_reasoning_node(state: PipelineEngineerState) -> PipelineEngineerState:
         seen_names.add(tpl["name"])
         templates_added += 1
 
-    # Cap total at 5 designs (AI up to 3 + templates up to 3, but
+    # Cap total at 10 designs (AI up to 3 + templates up to 3, but
     # duplicates collapse so the cap is rarely hit). This keeps the
     # PR diff readable while ensuring meaningful coverage.
-    validated = validated[:5]
+    validated = validated[:10]
 
     # Legacy fallback (single design) when nothing else applied.
     fallback_used = False

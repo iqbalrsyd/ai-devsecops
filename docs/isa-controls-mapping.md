@@ -32,7 +32,7 @@ Dokumen ini menjembatani **72 kontrol ISA (Unilever Information Security Assessm
 | `fintech_security` | Ledger, banking, KYC | *(tidak ada ISA spesifik; indirectly: ISA 45-46, 61)* | **0** |
 | `cms_security` | Blog post, comment moderation | *(tidak ada ISA spesifik)* | **0** |
 | `education_security` | LMS, course, student records | *(tidak ada ISA spesifik)* | **0** |
-| `microservice_security` | Service-to-service, mTLS, API gateway, network policy | ISA 25 (Ports), ISA 26-27 (Firewall), ISA 28 (WAF), ISA 30 (Proxy), ISA 31 (IDS/IPS), ISA 39 (Prod/Non-Prod Segregation) | **7** |
+| `microservice_security` | (REMOVED per R2.1 — arsitektur bukan variabel) | (N/A) | **0** |
 | `csp_security` | Content Security Policy, Helmet, secure headers | ISA 17 (Network Device Config) *(remote)* | **1** |
 | `dependency_security` | SCA, CVEs, npm audit, pip-audit | ISA 03-04 (Asset Inventory), ISA 06 (Patch), ISA 09 (Vuln Remediation) | **4** |
 | *(organizational)* | *Controls diluar pipeline otomatis* | ISA 01-02, ISA 05, ISA 08, ISA 10, ISA 18, ISA 40-41, ISA 42, ISA 43-44, ISA 57-58, ISA 59 | **14** |
@@ -184,21 +184,28 @@ ISA 68 (Standard Builds) → ISA 03 (Inventory): standardized build mempermudah 
 
 ---
 
-### 2.5 `microservice_security` (7 ISA Controls)
+### 2.5 `microservice_security` (REMOVED per R2.1)
 
-Terdeteksi dari: architecture signal `microservices`, `modular_monolith`, libs `istio`, `linkerd`, `consul`, `envoy`.
+**Status:** Dihapus per R2.1 (revisi 3-domain & 1-architecture). Arsitektur
+bukan variabel eksperimen, sehingga coverage `microservice_security` tidak
+applicable untuk dataset monolitik. Hubungan ISA di bawah ini tetap
+disimpan sebagai referensi untuk coverage lain (terutama `api_security`).
+
+Terdeteksi dari (legacy, tidak applicable): architecture signal
+`microservices`, `modular_monolith`, libs `istio`, `linkerd`, `consul`,
+`envoy`.
 
 | ISA | Control | Signal Match | v9 Augmentation |
 |-----|---------|-------------|-----------------|
-| ISA 25 | Only Approved Ports, Protocols, Services | entities: `service`, `gateway` | `docker_compose_validate` |
-| ISA 26 | Firewall Protection — Change Mgmt | entities: `service`, `gateway` | `dependency_scan_per_service` |
-| ISA 27 | Firewall Rule Review | — | `dependency_scan_per_service` |
-| ISA 28 | WAF Protection | entities: `gateway`, `service` | `dependency_scan_per_service` |
-| ISA 30 | Network-Based URL Filters (Proxy/Gateway) | entities: `gateway`, `proxy` | `docker_compose_validate` |
-| ISA 31 | Intrusion Detection/Prevention (IDS/IPS) | entities: `service` | `docker_compose_validate` |
-| ISA 39 | Prod/Non-Prod Segregation | architecture: `microservices` | `docker_compose_validate` |
+| ISA 25 | Only Approved Ports, Protocols, Services | entities: `service`, `gateway` | (N/A — covered by `api_security`) |
+| ISA 26 | Firewall Protection — Change Mgmt | entities: `service`, `gateway` | (N/A — covered by `api_security`) |
+| ISA 27 | Firewall Rule Review | — | (N/A) |
+| ISA 28 | WAF Protection | entities: `gateway`, `service` | (N/A — covered by `api_security`) |
+| ISA 30 | Network-Based URL Filters (Proxy/Gateway) | entities: `gateway`, `proxy` | (N/A) |
+| ISA 31 | Intrusion Detection/Prevention (IDS/IPS) | entities: `service` | (N/A) |
+| ISA 39 | Prod/Non-Prod Segregation | architecture: `microservices` | (N/A) |
 
-**Hubungan Internal**:
+**Hubungan Internal** (referensi historis):
 ```
 ISA 25 (Ports) → ISA 26-27 (Firewall) → ISA 28 (WAF) → ISA 30 (Proxy)
 ISA 29 (Remote Access) → ISA 31 (IDS/IPS)
@@ -420,7 +427,7 @@ Tabel ini eksplisit menyesuaikan dengan `§DEFAULT_AUGMENTATIONS` di `pipeline_a
 | `fintech_security` | 0 ISA (domain-driven) | `sast`, `secret_scan` | `fintech-ledger.yml` |
 | `cms_security` | 0 ISA (domain-driven) | `sast`, `sca` | `blog-csp.yml` |
 | `education_security` | 0 ISA (domain-driven) | `sast` | `education-lms.yml` |
-| `microservice_security` | 7 ISA (25-31, 39) | `docker_compose_validate`, `dependency_scan_per_service` | — |
+| `microservice_security` | 7 ISA (25-31, 39) — REMOVED per R2.1 | (N/A) | — |
 | `csp_security` | 1 ISA (17) | `sast` | `csp-header-check.yml` |
 | `dependency_security` | 4 ISA (03-04, 06, 09) | `sca` | *(npm audit / pip-audit / govulncheck)* |
 
@@ -902,10 +909,10 @@ Perluasan coverage:
 | ISA | Awal | Tools Baru | Apa yg Dicek |
 |-----|------|-----------|-------------|
 | ISA 18 (NTP) | ❌ manual | Checkov + Conftest | Repo punya `ntp` resource di Terraform → validasi konfigurasi NTP server |
-| ISA 25 (Ports) | ✓ (microservice) | Checkov + tfsec | Security group rules, exposed ports, ingress 0.0.0.0/0 |
-| ISA 26-27 (Firewall) | ✓ (microservice) | Checkov + KICS | Terraform firewall rules validation, change tracking via git diff |
+| ISA 25 (Ports) | ✓ (legacy: microservice) | Checkov + tfsec | Security group rules, exposed ports, ingress 0.0.0.0/0 |
+| ISA 26-27 (Firewall) | ✓ (legacy: microservice) | Checkov + KICS | Terraform firewall rules validation, change tracking via git diff |
 | ISA 29 (Remote Access) | ❌ manual | Checkov | VPN gateway config, bastion host, SSH open to world |
-| ISA 31 (IDS/IPS) | ✓ (microservice) | Checkov | GuardDuty/CloudTrail enabled, VPC flow logs, Suricata/Falco config |
+| ISA 31 (IDS/IPS) | ✓ (legacy: microservice) | Checkov | GuardDuty/CloudTrail enabled, VPC flow logs, Suricata/Falco config |
 | ISA 33 (Backup) | ✓ (data basic) | Checkov + Conftest | RDS backup enabled, backup retention period, cross-region backup, backup vault locked |
 | ISA 34 (RTO/RPO) | ✓ (data) | Conftest | Custom policy: backup retention >= N days, RPO config exists |
 | ISA 44 (Ext Storage) | ❌ manual | Checkov | EBS volume encryption, S3 default encryption |

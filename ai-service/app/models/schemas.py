@@ -22,11 +22,12 @@ class TechnologyDetection(BaseModel):
 
 
 class ArchitectureDetection(BaseModel):
-    architecture_type: Literal["monolithic", "frontend_backend", "microservices", "modular_monolith", "serverless", "library"] = Field(description="Architecture type")
+    # Per R2.1, arsitektur bukan variabel eksperimen. Always "monolithic".
+    architecture_type: Literal["monolithic"] = Field(description="Architecture type — always 'monolithic' per R2.1")
     architecture_confidence: float = Field(ge=0.0, le=1.0, description="Confidence score")
     architecture_reason: str = Field(description="Why this architecture was detected")
     service_count: Optional[int] = Field(None, description="Number of services")
-    service_names: Optional[list[str]] = Field(None, description="Service names if microservices")
+    service_names: Optional[list[str]] = Field(None, description="Service names (legacy, always empty per R2.1)")
     has_api_gateway: bool = Field(default=False, description="Has API gateway")
     has_message_queue: bool = Field(default=False, description="Has message queue")
     has_database_config: bool = Field(default=False, description="Has database configuration")

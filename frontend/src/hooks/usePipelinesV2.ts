@@ -344,6 +344,7 @@ export interface PdfReportRequest {
   features?: string[]
   security_coverages?: Array<Record<string, unknown>>
   ai_generated_rules?: Array<Record<string, unknown>>
+  llm_generated_rules?: Array<Record<string, unknown>>
   pipeline_augmentations?: Array<Record<string, unknown>>
   job_designs?: Array<Record<string, unknown>>
   generated_workflow?: string
@@ -378,11 +379,42 @@ export function useGeneratePdf() {
       // `/ai/...` Vite proxy (which rewrites to
       // `http://ai-service:8000/api/...`) instead of
       // the default `/api/v1/` proxy that goes to Go.
+      //
+      // v9.5: include run_id AND repository_full_name in both
+      // the URL (path param) and the body. The body is the
+      // primary source of pipeline metadata; the URL is the
+      // fallback that lets the BE look up the run in the DB
+      // if the body is empty (e.g. when the FE's state
+      // hasn't been hydrated yet).
       const res = await api.post(
         `/ai/pipeline/runs/${runId}/pdf`,
-        payload,
+        { run_id: runId, ...payload },
+        {
+          // LLM-backed PDF generation can take >30s when
+          // the AI service is rebuilding the run state. Set
+          // the axios timeout to 90s (default is 10s in many
+          // axios configs) so the user doesn't get a
+          // premature "timeout" error.
+          timeout: 90_000,
+        },
       )
-      return res.data as PdfReportResponse
+      const data = res.data as PdfReportResponse & {
+        fetch_warnings?: string[]
+        synthetic?: boolean
+      }
+      // Defensive: if the response is missing content_base64
+      // (e.g. the AI service returned an empty body), throw
+      // an error with a helpful message instead of letting
+      // the caller crash on `atob(undefined)`.
+      if (!data || !data.content_base64) {
+        throw new Error(
+          "AI service returned an empty PDF payload. " +
+            "This usually means the AI service was unreachable " +
+            "or the run has not been persisted yet. " +
+            "Try clicking 'Refresh' and then 'Generate PDF' again.",
+        )
+      }
+      return data
     },
   })
 }

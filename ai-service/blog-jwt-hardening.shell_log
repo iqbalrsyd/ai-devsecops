@@ -1,0 +1,3 @@
+::error file=src/auth/jwt.ts,line=33::JWT signed with short/hardcoded secret
+::warning file=src/server.js::No CSRF protection detected
+::notice::All checks completed

@@ -170,7 +170,10 @@ def _build_deployment_explanation(state: PipelineEngineerState) -> dict:
 
     arch_type = architecture.get("architecture_type", "monolithic")
     if arch_type == "modular_monolith":
-        reasons.append("Modular monolith architecture (FE/BE split) - containerized deployment with shared database recommended")
+        # Per R2.1, arsitektur bukan variabel eksperimen. Branch ini TIDAK
+        # akan pernah dieksekusi (arch_type selalu "monolithic"). Disimpan
+        # untuk backward compatibility.
+        reasons.append("Modular monolith (legacy, disabled per R2.1) - containerized deployment recommended")
     elif arch_type == "monolithic":
         reasons.append("Monolithic architecture - single Docker host deployment sufficient")
 

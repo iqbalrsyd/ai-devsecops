@@ -75,6 +75,18 @@ VALID_DOMAINS = list(DOMAIN_LIBRARY_INDICATORS.keys()) + ["general"]
 
 DOMAIN_CONFIDENCE_THRESHOLD = 0.50
 
+# Minimum raw heuristic score required for the LLM's domain pick to
+# be accepted. The raw score is the sum of weighted hits:
+#   library 3.0 + entity 2.0 + route 1.5 per matching signal.
+# Threshold 3.0 = at least 1 library match (or 1.5 routes, or 1.5
+# entities). When the LLM confidently picks a domain but the
+# heuristic disagrees (e.g. a healthcare repo has a single
+# `PAYMENT_GATEWAY_KEY` constant that the LLM over-weights toward
+# e-commerce with score=0), the heuristic veto in
+# `domain_detection_node` falls back to "general" so the pipeline
+# only emits standard jobs.
+MIN_HEURISTIC_SCORE = 3.0
+
 
 def _extract_library_names(package_files: dict) -> list[str]:
     """Extract library names from common package manifest files.
@@ -472,6 +484,24 @@ def domain_detection_node(state: PipelineEngineerState) -> PipelineEngineerState
             if confidence < 0.7 and heuristic_raw >= 1.0:
                 domain = heuristic_top
                 confidence = max(confidence, heuristic_raw * 0.3 + 0.4)
+        # Heuristic veto: if the LLM confidently picked a specific
+        # domain (e.g. "e-commerce") but the heuristic scored that
+        # domain below MIN_HEURISTIC_SCORE, treat the LLM answer as
+        # over-fit and fall back to "general". This handles repos
+        # that have 1-2 weak signals (e.g. a `PAYMENT_GATEWAY_KEY`
+        # constant in a healthcare billing service) where the LLM
+        # misclassifies based on a single token. The veto fires
+        # whenever the LLM-picked domain has a weak heuristic
+        # foundation, regardless of whether the top-heuristic
+        # domain happens to match. (Healthcare-micro-vuln: LLM says
+        # e-commerce, heuristic e-commerce = 2.0 < 3.0 -> veto
+        # fires even though `heuristic_top == domain`.)
+        if (
+            domain != "general"
+            and heuristic_raw_scores.get(domain, 0) < MIN_HEURISTIC_SCORE
+        ):
+            domain = "general"
+            confidence = 0.0
 
     if domain == "general":
         confidence = 1.0

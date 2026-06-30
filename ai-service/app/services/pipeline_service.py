@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -10,6 +11,18 @@ from app.services.github_service import get_workflow_run, get_workflow_logs, cre
 from app.database import SessionLocal
 
 from sqlalchemy import text
+
+# Global wall-clock budget for a single end-to-end pipeline run.
+# Pipeline generator invokes 8-11 LLM calls sequentially (one per
+# detection/inference/generation node). With a slow upstream gateway
+# (e.g. opencode.ai/zen/v1) each call can take 30-60s, and one
+# hung call would otherwise stall the whole request indefinitely.
+# After this many seconds, _invoke_graph_phase stops dispatching
+# new nodes and returns the partial result with an error so the
+# client gets a deterministic 502-with-error response instead of
+# a silent nginx timeout. Tunable via env so we can adjust per
+# environment without redeploying.
+PIPELINE_DEADLINE_SECONDS = int(os.getenv("PIPELINE_DEADLINE_SECONDS", "600"))
 
 
 def _get_default_state(
@@ -152,13 +165,94 @@ def _build_pipeline_response(result: dict, repository_full_name: str) -> dict:
 
     dashboard = result.get("dashboard_findings") or _build_dashboard_from_state(result)
 
-    return {
+    # v9.5 (Bab 5.13.5 — PDF "all fields empty" bug fix): the FE
+    # `RepoPipelineResult` interface expects fields prefixed with
+    # `detected_` (e.g. `detected_technologies`, `detected_architecture`,
+    # `detected_domain`, `security_coverages`, `pipeline_augmentations`,
+    # `ai_generated_rules`, `job_designs`, etc.) but `_build_pipeline_response`
+    # historically used a different naming convention
+    # (`technologies`, `architecture` + `architecture_detail`, etc.).
+    # When the FE reads the response, every `detected_*` lookup returns
+    # `undefined`, the fallback chain hits the Go-side summary (which
+    # also lacks these fields), and the PDF renders with all "N/A" —
+    # exactly the symptom the user reported.
+    #
+    # Fix: include BOTH the legacy key (kept for any callers that
+    # already work) AND the canonical `detected_*` alias so the FE
+    # interface resolves cleanly. The state field is the source of
+    # truth; the alias is a thin pass-through.
+    domain_raw = result.get("domain") if isinstance(result.get("domain"), dict) else None
+    detected_domain = (
+        result.get("detected_domain")
+        or (domain_raw.get("domain") if domain_raw else None)
+        or "general"
+    )
+    detected_domain_sub_type = (
+        result.get("domain_sub_type")
+        or (domain_raw.get("sub_type") if domain_raw else None)
+        or "none"
+    )
+    detected_domain_confidence = float(
+        result.get("domain_confidence")
+        or (domain_raw.get("confidence") if domain_raw else 0.0)
+        or 0.0
+    )
+    detected_domain_evidence = (
+        result.get("domain_evidence")
+        or (domain_raw.get("evidence") if domain_raw else [])
+        or []
+    )
+    detected_domain_threats = (
+        result.get("domain_threats")
+        or (domain_raw.get("threats") if domain_raw else [])
+        or []
+    )
+    # `detected_architecture` on the FE is a dict with shape
+    # `{ architecture_type, service_count, confidence, reason }`. Map
+    # the BE's split representation (string `architecture` + dict
+    # `architecture_detail`) into that single object.
+    arch_dict: dict = {}
+    if isinstance(arch_raw, dict):
+        arch_dict = dict(arch_raw)
+    else:
+        arch_dict = {"architecture_type": arch_type}
+    arch_dict.setdefault("architecture_type", arch_type)
+    arch_dict.setdefault(
+        "confidence", result.get("detected_architecture_confidence", 0.0)
+    )
+    arch_dict.setdefault(
+        "reason", result.get("detected_architecture_reason", "")
+    )
+
+    response = {
         "status": "analyzed" if not result.get("errors") else "failed",
         "repository": repository_full_name,
+        # === Canonical (legacy BE) keys — keep for backward compat ===
         "technologies": tech,
         "architecture": arch_type,
         "architecture_detail": arch_raw if isinstance(arch_raw, dict) else {},
         "security_needs": security.get("required_stages", []),
+        # === v9.5 aliases for FE RepoPipelineResult contract ===
+        "detected_technologies": tech,
+        "detected_architecture": arch_dict,
+        "detected_architecture_type": arch_type,
+        "detected_architecture_confidence": arch_dict.get("confidence", 0.0),
+        "detected_architecture_reason": arch_dict.get("reason", ""),
+        "detected_deployment": result.get("detected_deployment", {}) or {},
+        "recommended_deployment_target": result.get("recommended_deployment_target"),
+        "detected_domain": detected_domain,
+        "domain_sub_type": detected_domain_sub_type,
+        "domain_confidence": detected_domain_confidence,
+        "domain_evidence": detected_domain_evidence,
+        "domain_threats": detected_domain_threats,
+        "features": result.get("features", []),
+        "attack_surfaces": result.get("attack_surfaces", []),
+        "security_coverages": result.get("security_coverages", []) or [],
+        "pipeline_augmentations": result.get("pipeline_augmentations", []) or [],
+        "ai_generated_rules": result.get("ai_generated_rules", []) or [],
+        "llm_generated_rules": result.get("llm_generated_rules", []) or [],
+        "job_designs": result.get("job_designs", []) or [],
+        # === Pipeline output (already canonical names) ===
         "generated_workflow": result.get("generated_workflow", ""),
         "generated_workflow_generic": result.get("generated_workflow_generic", ""),
         "generated_workflow_custom": result.get("generated_workflow_custom", ""),
@@ -183,6 +277,8 @@ def _build_pipeline_response(result: dict, repository_full_name: str) -> dict:
         "workflow_conclusion": result.get("workflow_conclusion"),
         "summary": result.get("summary", ""),
         "findings": result.get("findings", []),
+        "code_scanning_alerts": result.get("code_scanning_alerts", []) or [],
+        "dashboard_findings": dashboard,
         "risk_score": result.get("risk_score"),
         "risk_score_metadata": result.get("risk_score_metadata"),
         "security_standards_coverage_score": result.get("security_standards_coverage_score"),
@@ -196,20 +292,18 @@ def _build_pipeline_response(result: dict, repository_full_name: str) -> dict:
         "security_coverage_metadata": result.get("security_coverage_metadata"),
         "recommendations": result.get("recommendations", []),
         "errors": result.get("errors", []),
-
         # Four-category dashboard buckets
-        "dashboard_findings": dashboard,
         "workflow_config_issues": result.get("workflow_config_issues", []),
         "maintenance_warnings": result.get("maintenance_warnings", []),
         "external_service_issues": result.get("external_service_issues", []),
         "remediation_recommendations": result.get("remediation_recommendations", []),
         "workflow_annotations": result.get("workflow_annotations", []),
-
         # Requirement 3: three-category execution results.
         "execution_results": result.get("execution_results", {}),
         "skipped_jobs": result.get("skipped_jobs", []),
         "dashboard_messages": (result.get("execution_results") or {}).get("dashboard_messages", []),
     }
+    return response
 
 
 def _build_dashboard_from_state(state: dict) -> dict:
@@ -227,7 +321,11 @@ def _build_dashboard_from_state(state: dict) -> dict:
     )
 
 
-def _invoke_graph_phase(state: PipelineEngineerState, node_names: list[str]) -> PipelineEngineerState:
+def _invoke_graph_phase(
+    state: PipelineEngineerState,
+    node_names: list[str],
+    deadline_monotonic: float | None = None,
+) -> PipelineEngineerState:
     # struktur-v9.2: 18-node graph. We import only the nodes that
     # are still in the active graph. Older nodes
     # (vulnerability_scan, security_requirement_inference,
@@ -342,6 +440,25 @@ def _invoke_graph_phase(state: PipelineEngineerState, node_names: list[str]) -> 
             # caller. There is no dedicated error_handler node
             # in v9.2.
             break
+        # Wall-clock deadline guard. A single hung LLM call (e.g.
+        # opencode.ai gateway never responding for a long prompt)
+        # would otherwise stall the entire request until the
+        # upstream proxy (nginx 900s) closes the socket. By
+        # breaking out of the dispatch loop here, we let the
+        # caller see a partial result with a clear error message
+        # and the FE can retry instead of hanging forever.
+        if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
+            elapsed = PIPELINE_DEADLINE_SECONDS
+            timeout_msg = (
+                f"Pipeline exceeded wall-clock deadline of "
+                f"{elapsed}s; halted before node '{name}'"
+            )
+            print(f"[pipeline] TIMEOUT {timeout_msg} (completed so far: "
+                  f"{[r['node'] for r in node_io_records if r.get('status') == 'ok']})")
+            state.setdefault("errors", []).append(timeout_msg)
+            state["error_stage"] = name
+            state["node_io"] = node_io_records
+            break
         node_fn = node_map.get(name)
         if not node_fn:
             continue
@@ -370,6 +487,19 @@ def _invoke_graph_phase(state: PipelineEngineerState, node_names: list[str]) -> 
             node_record["duration_ms"] = max(1, int(elapsed_ms))
         node_record["output_summary"] = _state_diff(before_snapshot, state)
         node_io_records.append(node_record)
+        # Per-node progress log (visible in `docker logs ai-service`).
+        # Helps the user see WHICH node is taking long when the
+        # pipeline appears to hang — the previous implementation
+        # only printed a single line at the end, which is useless
+        # for live debugging.
+        elapsed_ms = (time.monotonic() - node_start) * 1000
+        print(
+            f"[pipeline] {state.get('_current_phase', '?')}.{name} "
+            f"-> status={node_record['status']} "
+            f"duration_ms={int(elapsed_ms)} "
+            f"input_keys={len(node_record['input_keys'])} "
+            f"output_keys={len(node_record['output_summary'])}"
+        )
         # Refresh the snapshot with the post-node fingerprints
         # so the next node's diff is against the latest state.
         before_snapshot = {
@@ -1167,6 +1297,16 @@ def run_repo_generate(
     extra: dict | None = None,
     cached_insights: dict | None = None,
 ) -> dict:
+    # Wall-clock timer for the whole pipeline. Logged at the end so
+    # ops can see how long each phase took without digging through
+    # uvicorn logs. The previous implementation only logged
+    # individual node_io durations, which made it impossible to
+    # tell whether slowness was in GitHub fetch, LLM call, or
+    # workflow generation.
+    import time as _wallclock
+    _wc_start = _wallclock.monotonic()
+    print(f"[pipeline] >>> START run_repo_generate for {repository_full_name}")
+
     state = _get_default_state(repository_full_name, github_token)
     state["extra_params"] = extra or {}
     state["extra_params"]["_cached_insights_used"] = bool(cached_insights)
@@ -1203,7 +1343,18 @@ def run_repo_generate(
         ])
 
     try:
-        state = _invoke_graph_phase(state, nodes)
+        # Wall-clock deadline for the full dispatch loop. Each
+        # LLM-backed node is allowed to take as long as the
+        # upstream is willing to wait (we cannot interrupt a
+        # single in-flight HTTP call to the LLM provider without
+        # depending on a non-portable signal/threading trick), but
+        # we WILL skip any remaining nodes once the budget is
+        # exhausted. This guarantees the FE gets a response within
+        # PIPELINE_DEADLINE_SECONDS + (one in-flight LLM call
+        # duration) instead of waiting for nginx's
+        # proxy_read_timeout (900s) to fire.
+        _deadline = time.monotonic() + PIPELINE_DEADLINE_SECONDS
+        state = _invoke_graph_phase(state, nodes, deadline_monotonic=_deadline)
     except Exception as e:
         state["errors"].append(str(e))
 
@@ -1257,6 +1408,14 @@ def run_repo_generate(
     persist_err = _persist_pipeline_result(repository_full_name, result, project_id, query)
     if persist_err:
         result.setdefault("errors", []).append(persist_err)
+    _wc_elapsed = _wallclock.monotonic() - _wc_start
+    print(
+        f"[pipeline] <<< END run_repo_generate for {repository_full_name} "
+        f"in {_wc_elapsed:.1f}s "
+        f"(status={result.get('status')!r}, "
+        f"errors={len(result.get('errors') or [])}, "
+        f"stages={len(result.get('generated_stages', []))})"
+    )
     return result
 
 
@@ -1287,6 +1446,13 @@ def _apply_cached_insights(state: PipelineEngineerState, insights: dict):
     state["detected_architecture_confidence"] = insights.get("architecture_confidence", 0.85)
     state["detected_deployment"] = insights.get("deployment") or state.get("detected_deployment", {})
     state["recommended_deployment_target"] = insights.get("recommended_deployment_target") or state.get("recommended_deployment_target")
+
+    # Custom-jobs toggle: read the env var so operators can force the
+    # standard pipeline only (skip domain-specific jobs). The
+    # workflow_generator also implicitly forces `general_only` when
+    # domain_confidence < 0.5 (heuristic veto fell back to "general").
+    from app.agents.general_only import is_general_only
+    state["general_only"] = is_general_only()
 
     if insights.get("security_needs"):
         state["inferred_security_needs"] = insights.get("security_needs")
@@ -2077,6 +2243,19 @@ def run_pipeline_analysis(
     `force=True`, the cached analysis is bypassed and the log
     evaluator runs again.
     """
+    import time as _analysis_t
+    _analysis_started = _analysis_t.monotonic()
+    _ANALYSIS_TOTAL_BUDGET_S = 180.0  # 3 minutes — never block the worker longer
+
+    def _budget_exceeded(label: str = "") -> bool:
+        if _analysis_t.monotonic() - _analysis_started > _ANALYSIS_TOTAL_BUDGET_S:
+            print(
+                f"[analysis] TOTAL budget ({_ANALYSIS_TOTAL_BUDGET_S}s) "
+                f"exhausted{f' at {label}' if label else ''}, returning partial result"
+            )
+            return True
+        return False
+
     # Only consult the cache when force=False. Skipping the
     # _get_saved_analysis call entirely on force=True guarantees the
     # log evaluator runs again even if a stale row is in the DB.
@@ -2114,92 +2293,147 @@ def run_pipeline_analysis(
     # when the caller did not run the full Tahap 1 graph. This is
     # what makes the "Refresh Analysis" button on a not-yet-deployed
     # pipeline produce non-zero applicable security coverages.
+    #
+    # Performance note (Bab 5.14 / v9.3 hotfix): the previous
+    # implementation made 2 sequential HTTP calls per file (one to
+    # the tree URL, one to the contents URL) for up to 200 files.
+    # For `ecommerce-clean` (~50 source files) that was up to 100
+    # serial round-trips to api.github.com with 10s timeout each —
+    # worst case 16 minutes for a single repository scan. The new
+    # version:
+    #   1. caps the number of files fetched to MAX_FILES (30),
+    #   2. uses the tree URL only (single call per file via blob URL),
+    #   3. uses sequential fetches (no ThreadPoolExecutor — the
+    #      uvicorn worker is single-threaded and concurrent sync
+    #      HTTP from a sync handler deadlocks the event loop).
     try:
         import httpx as _httpx
+
+        # Cap on files fetched. 30 manifest + source files is plenty
+        # for the AI agent to see the project structure; anything more
+        # just slows down the scan with diminishing returns.
+        MAX_FILES = 30
+        # Per-file HTTP timeout. Short so a slow file does not
+        # consume the entire request budget.
+        PER_FILE_TIMEOUT_S = 5.0
+
         _headers = {"Authorization": f"Bearer {github_token}"} if github_token else {}
         _headers["Accept"] = "application/vnd.github+json"
+
         # 1. Get the default branch.
         repo_resp = _httpx.get(
             f"https://api.github.com/repos/{repository_id}",
             headers=_headers,
-            timeout=15,
+            timeout=10,
         )
-        if repo_resp.status_code == 200:
+        if repo_resp.status_code != 200:
+            print(
+                f"[analysis] GitHub repo lookup failed: status={repo_resp.status_code} "
+                f"body={repo_resp.text[:200]}"
+            )
+        else:
             default_branch = repo_resp.json().get("default_branch", "main")
             # 2. Get the tree.
             tree_resp = _httpx.get(
                 f"https://api.github.com/repos/{repository_id}/git/trees/{default_branch}?recursive=1",
                 headers=_headers,
-                timeout=15,
+                timeout=10,
             )
-            if tree_resp.status_code == 200:
-                tree = tree_resp.json().get("tree", [])
-                # Filter for package manifests and source files.
-                manifest_names = {
-                    "package.json", "requirements.txt", "pyproject.toml",
-                    "go.mod", "Cargo.toml", "Gemfile", "build.gradle",
-                    "pom.xml", "composer.json",
-                }
-                source_exts = (
-                    ".js", ".ts", ".jsx", ".tsx", ".py", ".go", ".rs",
-                    ".java", ".rb", ".php",
-                )
-                repo_files: dict[str, str] = {}
-                source_files: list[dict] = []
-                for entry in tree:
-                    if entry.get("type") != "blob":
-                        continue
-                    path = entry.get("path", "")
-                    name = path.rsplit("/", 1)[-1].lower()
-                    if name in manifest_names:
-                        content_resp = _httpx.get(
-                            entry.get("url", ""),
-                            headers=_headers,
-                            timeout=10,
-                        )
-                        if content_resp.status_code == 200:
-                            try:
-                                repo_files[path] = _httpx.get(
-                                    f"https://api.github.com/repos/{repository_id}/contents/{path}",
-                                    headers=_headers,
-                                    timeout=10,
-                                ).json().get("content", "")
-                                # GitHub returns base64; decode it.
-                                import base64 as _b64
-                                raw = repo_files[path]
-                                repo_files[path] = _b64.b64decode(
-                                    raw.replace("\n", "")
-                                ).decode("utf-8", errors="ignore")
-                            except Exception:
-                                pass
-                    elif path.endswith(source_exts) and not any(
-                        seg in path for seg in ("node_modules", "/test", "dist/", "build/")
-                    ):
-                        content_resp = _httpx.get(
-                            entry.get("url", ""),
-                            headers=_headers,
-                            timeout=10,
-                        )
-                        if content_resp.status_code == 200:
-                            try:
-                                import base64 as _b64
-                                raw = content_resp.json().get("content", "")
-                                text = _b64.b64decode(
-                                    raw.replace("\n", "")
-                                ).decode("utf-8", errors="ignore")
-                                source_files.append({
-                                    "path": path,
-                                    "content": text[:8192],
-                                })
-                            except Exception:
-                                pass
-                state["repository_files"] = repo_files
-                state["source_files"] = source_files
-                state["repository_structure"] = [e.get("path") for e in tree if e.get("type") == "blob"][:200]
+            if tree_resp.status_code != 200:
                 print(
-                    f"[analysis] populated repository_files={len(repo_files)} "
-                    f"source_files={len(source_files)} from GitHub tree"
+                    f"[analysis] GitHub tree fetch failed: status={tree_resp.status_code} "
+                    f"body={tree_resp.text[:200]}"
                 )
+            else:
+                tree = tree_resp.json().get("tree", [])
+            # Filter for package manifests and source files.
+            manifest_names = {
+                "package.json", "requirements.txt", "pyproject.toml",
+                "go.mod", "Cargo.toml", "Gemfile", "build.gradle",
+                "pom.xml", "composer.json",
+            }
+            source_exts = (
+                ".js", ".ts", ".jsx", ".tsx", ".py", ".go", ".rs",
+                ".java", ".rb", ".php",
+            )
+            # Pick the most relevant files first:
+            #   - all package manifests (cap at 9) — critical for
+            #     technology detection
+            #   - then source files sorted by path depth (top-level
+            #     first), capped to fit MAX_FILES total
+            manifest_entries: list[dict] = []
+            source_entries: list[dict] = []
+            for entry in tree:
+                if entry.get("type") != "blob":
+                    continue
+                path = entry.get("path", "")
+                name = path.rsplit("/", 1)[-1].lower()
+                if name in manifest_names:
+                    manifest_entries.append(entry)
+                elif path.endswith(source_exts) and not any(
+                    seg in path for seg in ("node_modules", "/test", "dist/", "build/", "venv/", ".venv/")
+                ):
+                    source_entries.append(entry)
+            # Sort source files by depth then path (top-level first)
+            source_entries.sort(key=lambda e: (e.get("path", "").count("/"), e.get("path", "")))
+            # Truncate to fit budget
+            selected = manifest_entries[:9] + source_entries[: max(0, MAX_FILES - 9)]
+            print(
+                f"[analysis] GitHub tree: {len(tree)} total, "
+                f"selected {len(selected)} (manifests={min(9, len(manifest_entries))}, "
+                f"source={len(selected) - min(9, len(manifest_entries))})"
+            )
+
+            # Sequential fetch (single HTTP call per file via blob
+            # URL). No thread pool — uvicorn is single-threaded and
+            # concurrent sync HTTP from a sync handler deadlocks
+            # the event loop.
+            import base64 as _b64
+            import time as _time
+            _t_start = _time.monotonic()
+            repo_files: dict[str, str] = {}
+            source_files: list[dict] = []
+            for entry in selected:
+                if _time.monotonic() - _t_start > 20.0:
+                    print(
+                        f"[analysis] GitHub fetch budget (20s) exhausted, "
+                        f"stopping early with {len(repo_files)} manifests + "
+                        f"{len(source_files)} source files"
+                    )
+                    break
+                path = entry.get("path", "")
+                url = entry.get("url", "")
+                if not url:
+                    continue
+                try:
+                    r = _httpx.get(url, headers=_headers, timeout=PER_FILE_TIMEOUT_S)
+                    if r.status_code != 200:
+                        continue
+                    raw = r.json().get("content", "")
+                    text = _b64.b64decode(
+                        raw.replace("\n", "")
+                    ).decode("utf-8", errors="ignore")
+                    if path.rsplit("/", 1)[-1].lower() in manifest_names:
+                        repo_files[path] = text
+                    else:
+                        source_files.append({
+                            "path": path,
+                            "content": text[:8192],
+                        })
+                except Exception:
+                    continue
+
+            state["repository_files"] = repo_files
+            state["source_files"] = source_files
+            state["repository_structure"] = [
+                e.get("path") for e in tree if e.get("type") == "blob"
+            ][:200]
+            elapsed = _time.monotonic() - _t_start
+            print(
+                f"[analysis] populated repository_files={len(repo_files)} "
+                f"source_files={len(source_files)} from GitHub tree "
+                f"(fetch elapsed {elapsed:.1f}s)"
+            )
     except Exception as fetch_exc:
         print(f"[analysis] GitHub tree fetch failed (non-fatal): {fetch_exc}")
 
@@ -2395,11 +2629,21 @@ def run_pipeline_analysis(
             from app.agents.llm_cvss_estimator import (
                 llm_estimate_cvss_for_findings,
             )
+            import time as _ct
+            _sarif_start = _ct.monotonic()
+            _SARIF_BUDGET_S = 20.0
             artifacts = get_workflow_run_artifacts(
                 repository_id, run_id, github_token
             ) or []
             sarif_text: str | None = None
             for art in artifacts:
+                if _ct.monotonic() - _sarif_start > _SARIF_BUDGET_S:
+                    print(
+                        f"[analysis] SARIF artifact download budget "
+                        f"({_SARIF_BUDGET_S}s) exhausted, skipping "
+                        f"remaining artifacts"
+                    )
+                    break
                 name = (art.get("name") or "").lower()
                 if name.endswith(".sarif") or "sarif" in name:
                     sarif_text = download_artifact(
@@ -2454,30 +2698,31 @@ def run_pipeline_analysis(
                 f"{cvss_exc}"
             )
 
-    try:
-        # Re-run coverage_inference if the state has no
-        # `security_coverages` yet (legacy callers skip Tahap 2).
-        if not state.get("security_coverages"):
-            try:
-                from app.agents.nodes.coverage_inference_node import (
-                    coverage_inference_node,
-                )
-                state = coverage_inference_node(state)
-                print(
-                    f"[analysis] coverage_inference rerun: "
-                    f"{len(state.get('security_coverages', []))} coverages, "
-                    f"{sum(1 for c in (state.get('security_coverages') or []) if c.get('applicable'))} applicable"
-                )
-            except Exception as ce:
-                print(f"[analysis] coverage_inference rerun failed: {ce}")
-        state = _invoke_graph_phase(state, [
-            "security_analysis",
-            "recommendation_generation",
-            "response_formatter",
-        ])
-        state["_current_phase"] = "tahap_4"
-    except Exception as e:
-        state["errors"].append(str(e))
+    if not _budget_exceeded("graph-phase"):
+        try:
+            # Re-run coverage_inference if the state has no
+            # `security_coverages` yet (legacy callers skip Tahap 2).
+            if not state.get("security_coverages"):
+                try:
+                    from app.agents.nodes.coverage_inference_node import (
+                        coverage_inference_node,
+                    )
+                    state = coverage_inference_node(state)
+                    print(
+                        f"[analysis] coverage_inference rerun: "
+                        f"{len(state.get('security_coverages', []))} coverages, "
+                        f"{sum(1 for c in (state.get('security_coverages') or []) if c.get('applicable'))} applicable"
+                    )
+                except Exception as ce:
+                    print(f"[analysis] coverage_inference rerun failed: {ce}")
+            state = _invoke_graph_phase(state, [
+                "security_analysis",
+                "recommendation_generation",
+                "response_formatter",
+            ])
+            state["_current_phase"] = "tahap_4"
+        except Exception as e:
+            state["errors"].append(str(e))
 
     # Run workflow compliance validator if we have a generated workflow
     validation_findings = []

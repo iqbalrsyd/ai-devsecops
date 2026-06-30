@@ -106,9 +106,7 @@ _GENERAL_API_RULES = ("owasp-api.yml",)  # OWASP API Top 10 2023
 
 | arch_type | Skip rules added |
 |---|---|
-| `monolithic` | `kubernetes`, `service-mesh`, `istio` |
-| `microservices` | (none — k8s rules tetap applicable) |
-| `modular_monolith` | (sama dgn monolith) |
+| `monolithic` (only, per R2.1) | `kubernetes`, `service-mesh`, `istio` |
 
 ### Layer 5: LLM-Driven Extension
 **Trigger**: LLM (di inference) return `llm_rule_suggestions` (opsional)

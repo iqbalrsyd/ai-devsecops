@@ -15,35 +15,42 @@ T = TypeVar("T", bound=BaseModel)
 def get_llm():
     provider = settings.LLM_PROVIDER
     model = settings.LLM_MODEL
+    request_timeout = settings.LLM_REQUEST_TIMEOUT
 
     if provider == "openai":
-        return ChatOpenAI(model=model, api_key=settings.OPENAI_API_KEY)
+        return ChatOpenAI(
+            model=model,
+            api_key=settings.OPENAI_API_KEY,
+            request_timeout=request_timeout,
+        )
     elif provider == "anthropic":
-        return ChatAnthropic(model=model, api_key=settings.ANTHROPIC_API_KEY)
+        return ChatAnthropic(
+            model=model,
+            api_key=settings.ANTHROPIC_API_KEY,
+        )
     elif provider == "openrouter":
         return ChatOpenAI(
             model=model,
             api_key=settings.OPENROUTER_API_KEY,
             base_url=settings.OPENROUTER_BASE_URL,
+            request_timeout=request_timeout,
         )
     elif provider == "opencode":
-        # OpenCode AI gateway (https://opencode.ai). Exposes an
-        # OpenAI-compatible /chat/completions endpoint, so we reuse
-        # ChatOpenAI with the gateway base URL.
         base_url = settings.OPENCODE_BASE_URL or "https://opencode.ai/zen/v1"
         return ChatOpenAI(
             model=model,
             api_key=settings.OPENCODE_API_KEY,
             base_url=base_url,
+            request_timeout=request_timeout,
         )
     elif provider == "google":
-        # Google Gemini via OpenAI-compatible endpoint.
         from langchain_openai import ChatOpenAI as _ChatOpenAI
         base_url = settings.GOOGLE_BASE_URL or "https://generativelanguage.googleapis.com/v1beta/openai/"
         return _ChatOpenAI(
             model=model,
             api_key=settings.GOOGLE_API_KEY,
             base_url=base_url,
+            request_timeout=request_timeout,
         )
     else:
         raise ValueError(f"Unsupported LLM provider: {provider}")

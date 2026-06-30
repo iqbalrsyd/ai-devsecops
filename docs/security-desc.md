@@ -278,27 +278,27 @@ workflow generator filtering (file evidence validation)
 
 ---
 
-### 3.14. `per_service_sast` — Per-Service SAST
+### 3.14. `per_service_sast` — Per-Service SAST (DISABLED per R2.1)
 
 | Properti | Nilai |
 |---|---|
-| **Tujuan** | Untuk microservices/modular monolith: jalankan SAST per service directory (bukan satu scan global). |
+| **Tujuan** | Untuk microservices/modular monolith: jalankan SAST per service directory (bukan satu scan global). **DISABLED per R2.1** — arsitektur bukan variabel eksperimen. |
 | **Tools** | Semgrep, CodeQL, dengan `--scan-root` per service. |
 | **Input** | Multiple service directories (matrix). |
 | **Output** | SARIF per service. |
-| **Default status** | `recommended` jika arsitektur `microservices` atau `modular_monolith`. |
-| **Kapan di-drop** | Arsitektur `monolithic`. |
-| **Mapping domain** | Microservices. |
+| **Default status** | `disabled` per R2.1 (monolithic only). |
+| **Kapan di-drop** | Selalu di-drop (R2.1 — arsitektur monolitik). |
+| **Mapping domain** | (N/A) |
 
-**Konteks `eccomerce-monolith-vuln`:** **DROPPED** — arsitektur monolithic.
+**Konteks `eccomerce-monolith-vuln`:** **DROPPED** — arsitektur monolithic, per R2.1.
 
 ---
 
-### 3.15. `per_service_dep_scan` — Per-Service Dependency Scan
+### 3.15. `per_service_dep_scan` — Per-Service Dependency Scan (DISABLED per R2.1)
 
 | Properti | Nilai |
 |---|---|
-| **Tujuan** | Scan CVE dependencies per service di microservices. |
+| **Tujuan** | Scan CVE dependencies per service di microservices. **DISABLED per R2.1** — arsitektur bukan variabel eksperimen. |
 | **Tools** | Trivy, `npm audit`, matrix execution. |
 | **Input** | Per-service lockfiles. |
 | **Output** | SARIF per service. |

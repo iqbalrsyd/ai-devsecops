@@ -113,7 +113,7 @@ def make_mock_state_for_eccomerce_monolith() -> PipelineEngineerState:
             {"id": "fintech_security", "applicable": False, "reason": "no ledger/transfer signal", "confidence": 0.0},
             {"id": "cms_security", "applicable": False, "reason": "no post/comment signal", "confidence": 0.0},
             {"id": "education_security", "applicable": False, "reason": "no course/quiz signal", "confidence": 0.0},
-            {"id": "microservice_security", "applicable": False, "reason": "monolith, not microservices", "confidence": 0.0},
+            {"id": "microservice_security", "applicable": False, "reason": "REMOVED per R2.1 — arsitektur bukan variabel eksperimen", "confidence": 0.0},
             {"id": "csp_security", "applicable": False, "reason": "no helmet library", "confidence": 0.0},
             {"id": "dependency_security", "applicable": True, "reason": "package manager detected (npm)", "confidence": 0.95},
         ],

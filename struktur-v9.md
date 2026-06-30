@@ -75,9 +75,6 @@ Alasan urutan: `pattern_inference` (K2.3) perlu hasil `coverage_inference` (untu
 | `healthcare_security` | PHI, FHIR, HIPAA | libs: fhir, hl7, hapi-fhir; entities: patient, prescription, ehr; domain=healthcare |
 | `fintech_security` | Ledger, banking, KYC | libs: plaid, open-banking, dwolla; entities: ledger, transfer, wallet, kyc |
 | `cms_security` | Blog post, comment | libs: marked, dompurify, ghost; entities: post, comment, article; domain=blog |
-| `education_security` | LMS, course | libs: moodle-sdk, scorm, canvas-lms; entities: course, enrollment, quiz; domain=education |
-| `microservice_security` | Service-to-service, mTLS | architectures: microservices, modular_monolith; libs: istio, linkerd |
-| `csp_security` | Content Security Policy | libs: helmet, csp, express-helmet |
 | `dependency_security` | SCA, CVEs | package_managers: npm, yarn, pip, go mod, cargo |
 
 #### Augmentation Library (per coverage)
@@ -96,7 +93,7 @@ Alasan urutan: `pattern_inference` (K2.3) perlu hasil `coverage_inference` (untu
 | `fintech_security` | sast (fintech-ledger.yml), secret_scan (banking keys) |
 | `cms_security` | sast (blog-csp.yml), sca (markdown CVEs) |
 | `education_security` | sast (education-lms.yml) |
-| `microservice_security` | docker_compose_validate, dependency_scan_per_service |
+| `microservice_security` | (REMOVED per R2.1 — arsitektur bukan variabel) |
 | `csp_security` | sast (csp-header-check.yml) |
 | `dependency_security` | sca (npm audit / pip-audit / govulncheck) |
 
@@ -214,22 +211,21 @@ Detected technologies:
 {technologies}
 
 Analyze the architecture and return JSON with:
-- architecture_type: one of "monolithic", "frontend_backend", "microservices", "modular_monolith", "serverless", "library"
+- architecture_type: "monolithic" only (per R2.1 — arsitektur bukan variabel eksperimen)
 - architecture_confidence: confidence score 0.0-1.0 based on evidence
 - architecture_reason: explanation of why this architecture was chosen
 - service_count: number of distinct services/applications detected (integer, null if unknown)
-- service_names: list of service names if microservices/modular_monolith detected, null otherwise
+- service_names: list of service names (legacy, always empty per R2.1)
 - has_api_gateway: boolean
 - has_message_queue: boolean
 - has_database_config: boolean
 - is_containerized: boolean
 - has_shared_libraries: boolean (true if multiple services share common libraries/packages)
 
-Key distinction for modular_monolith:
-- Multiple services/directories exist but share database or are deployed together
-- NOT microservices (no independent deployment, no service mesh)
-- Has clear separation of concerns but tight coupling
-- Example: backend/api + frontend + worker all in one repo with shared DB
+Catatan: Per R2.1 (revisi 3-domain & 1-architecture), arsitektur BUKAN
+variabel eksperimen. Semua repositori diklasifikasikan sebagai monolitik,
+termasuk FE/BE split dan modular monolith yang sebelumnya dinaikkan.
+Fokus variasi ada di domain (e-commerce, blog, iot).
 
 Return ONLY valid JSON. No markdown.
 ```

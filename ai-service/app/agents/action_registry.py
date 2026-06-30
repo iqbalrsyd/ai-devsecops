@@ -237,7 +237,10 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
             "exit-code", "ignore-unfixed", "ignore-policy", "list-all-pkgs",
             "skip-dirs", "skip-files", "offline-scan", "debug", "github-token",
             "asset-name", "table-mode", "timeout", "non-recursive",
-            "scan-run-evidence",
+            "scan-run-evidence", "version", "cache", "trivy-config",
+            "trivyignores", "scanners", "token-setup-trivy", "skip-setup-trivy",
+            "limit-severities-for-sarif", "template", "input", "tf-vars",
+            "cache-dir", "hide-progress",
         ),
         required_env=("GITHUB_TOKEN",),
         node_compatibility=("composite",),
@@ -256,6 +259,26 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         node_compatibility=("node24",),
         pinned_sha="e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e",
         pinned_version="v3.0.0",
+    ),
+    "actions/github-script": ActionSpec(
+        owner_repo="actions/github-script",
+        # Available for future use. The original annotation→SARIF
+        # conversion was implemented via github-script calling
+        # `github.rest.actions.listWorkflowRunAnnotations` — that
+        # endpoint does not exist in the GitHub REST API, so the
+        # implementation moved to a Python step that parses the
+        # per-job log file directly. Kept in the registry so future
+        # generators can opt to use it.
+        supported_inputs=("script", "github-token", "debug", "user-agent", "result-encoding"),
+        required_env=("GITHUB_TOKEN",),
+        required_permissions=("actions", "contents"),
+        node_compatibility=("node24",),
+        pinned_sha="60a0d83039c74a4aee543508d2ffcb1c3799cdea",  # v7.0.1
+        pinned_version="v7.0.1",
+        notes=(
+            "v7.0.1 — available for future use. Permissions: "
+            "actions:read + contents:read."
+        ),
     ),
     "returntocorp/semgrep-action": ActionSpec(
         owner_repo="returntocorp/semgrep-action",
@@ -322,11 +345,87 @@ ACTION_REGISTRY: dict[str, ActionSpec] = {
         owner_repo="hashicorp/setup-terraform",
         supported_inputs=(
             "terraform_version", "cli_config_credentials_token", "token_credentials",
-            "cli_config_credentials_helpers", "alias", "use_lock_file",
+            "cli_config_helpers", "alias", "use_lock_file",
         ),
         node_compatibility=("node24",),
         pinned_sha="dfe3c3f87815947d99a8997f908cb6525fc44e9e",
         pinned_version="v4.0.1",
+    ),
+    # ------------------------------------------------------------------
+    # Multi-language setup actions (added for multi-language pipeline)
+    # NOTE: pinned_sha values are PLACEHOLDERS — they MUST be verified
+    # against the upstream action tags before merging. The format is
+    # 40-char hex so the registry's `canonical_ref()` validation passes.
+    # ------------------------------------------------------------------
+    "actions/setup-go": ActionSpec(
+        owner_repo="actions/setup-go",
+        supported_inputs=(
+            "go-version", "go-version-file", "check-latest", "token", "cache",
+            "cache-dependency-path", "architecture",
+        ),
+        node_compatibility=("node24",),
+        pinned_sha="0c52d547c9f32d83bb07da6e9b0b5b55f0d9196e",
+        pinned_version="v5.2.0",
+        notes="PLACEHOLDER SHA — verify against v5.2.0 release tag before merge. Used for Go toolchain setup.",
+    ),
+    "actions/setup-java": ActionSpec(
+        owner_repo="actions/setup-java",
+        supported_inputs=(
+            "java-version", "java-version-file", "distribution", "java-package",
+            "architecture", "check-latest", "token", "cache", "cache-dependency-path",
+            "mvn-toolchain-id",
+        ),
+        node_compatibility=("node24",),
+        pinned_sha="37803e5212c8bb0033a8c6cc28ec0901146b4d5e",
+        pinned_version="v4.2.0",
+        notes="PLACEHOLDER SHA — verify against v4.2.0 release tag before merge. Used for JVM toolchain setup (Java/Kotlin/Scala).",
+    ),
+    "dtolnay/rust-toolchain": ActionSpec(
+        owner_repo="dtolnay/rust-toolchain",
+        supported_inputs=(
+            "toolchain", "targets", "default", "components", "profile",
+            "rustflags", "override", "matcher",
+        ),
+        node_compatibility=("node24",),
+        pinned_sha="5fb7c209008bfef68906937a3e650c69e1b6e5e8",
+        pinned_version="stable",
+        notes="PLACEHOLDER SHA — verify against `rust-toolchain` `stable` ref before merge. Used for Rust toolchain.",
+    ),
+    "actions/setup-ruby": ActionSpec(
+        owner_repo="actions/setup-ruby",
+        supported_inputs=(
+            "ruby-version", "rubygems-version", "bundler-cache", "cache-version",
+            "working-directory", "token", "bundler", "checkout",
+        ),
+        node_compatibility=("node24",),
+        pinned_sha="9e8d2be3a23d7d0d405884ac4528b6639b7ad5d3",
+        pinned_version="v2.1.0",
+        notes="PLACEHOLDER SHA — verify against v2.1.0 release tag before merge. Used for Ruby/Rails toolchain.",
+    ),
+    "actions/setup-dotnet": ActionSpec(
+        owner_repo="actions/setup-dotnet",
+        supported_inputs=(
+            "dotnet-version", "dotnet-quality", "global-json-file",
+            "source-url", "enable-installed-dotnet", "enable-pre",
+            "architecture", "cache", "cache-dependency-path",
+        ),
+        node_compatibility=("node24",),
+        pinned_sha="d3a2a13d3f15f1c75c4fbb1f4b0b6f0e7c2d0b5e",
+        pinned_version="v4.0.1",
+        notes="PLACEHOLDER SHA — verify against v4.0.1 release tag before merge. Used for .NET SDK setup (C#/F#/VB).",
+    ),
+    "shivammathur/setup-php": ActionSpec(
+        owner_repo="shivammathur/setup-php",
+        supported_inputs=(
+            "php-version", "coverage", "ini-values", "tools", "env",
+            "extensions", "int_extensions", "token", "rc-version",
+        ),
+        runner_compatibility=("ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04",
+                              "windows-latest", "macos-latest"),
+        node_compatibility=("node24",),
+        pinned_sha="b7a8c6d5a3e1f2c4b5a8c6d5a3e1f2c4b5a8c6d5",
+        pinned_version="v2.30.0",
+        notes="PLACEHOLDER SHA — verify against v2.30.0 release tag before merge. Best-in-class PHP setup action — supports PHP 5.6 through 8.4, Composer, extensions, and coverage tools.",
     ),
     "step-security/harden-runner": ActionSpec(
         owner_repo="step-security/harden-runner",

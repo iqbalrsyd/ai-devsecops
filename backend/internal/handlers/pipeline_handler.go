@@ -1489,6 +1489,113 @@ func (h *PipelineHandler) GetInsights(c *gin.Context) {
 	c.JSON(http.StatusOK, insight)
 }
 
+// GET /api/v1/repositories/:repoId/pipeline-summary
+//
+// Bab 5.13.5: returns the cached Tahap-1 / Tahap-2 detection
+// (technologies, architecture, deployment) in the same shape
+// the AI service's `RepoPipelineResult` exposes to the FE. The
+// RunDetail page uses this as a fallback when the AI service's
+// `POST /ai/pipeline/repo/pipeline` call is slow or fails —
+// the Go side already persists these fields on
+// `repository_insights` so the PDF cover page never reads
+// "Architecture: — | Domain: —".
+func (h *PipelineHandler) GetPipelineSummary(c *gin.Context) {
+	repoID, err := uuid.Parse(c.Param("repoId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid repository id"})
+		return
+	}
+
+	var repo models.Repository
+	if err := h.db.WithContext(c.Request.Context()).First(&repo, "id = ?", repoID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "repository not found"})
+		return
+	}
+
+	insight, err := h.insightRepo.FindByRepository(repoID)
+	if err != nil || insight == nil {
+		// No cached insight yet — return a minimal shape so the
+		// FE can still detect the empty state.
+		c.JSON(http.StatusOK, gin.H{
+			"repository_full_name":  repo.FullName,
+			"has_insight":           false,
+			"detected_technologies": gin.H{},
+			"detected_architecture": gin.H{},
+			"detected_deployment":   gin.H{},
+		})
+		return
+	}
+
+	// Frameworks / build tools / package managers / test
+	// frameworks are stored as JSONB strings. Unmarshall each
+	// one; fall back to an empty list when the column is
+	// missing or malformed so the FE can still render an empty
+	// string instead of "—".
+	var frameworks, buildTools, packageManagers, testFrameworks []string
+	if insight.Frameworks != "" && insight.Frameworks != "null" && insight.Frameworks != "[]" {
+		_ = json.Unmarshal([]byte(insight.Frameworks), &frameworks)
+	}
+	if insight.BuildTools != "" && insight.BuildTools != "null" && insight.BuildTools != "[]" {
+		_ = json.Unmarshal([]byte(insight.BuildTools), &buildTools)
+	}
+	if insight.PackageManagers != "" && insight.PackageManagers != "null" && insight.PackageManagers != "[]" {
+		_ = json.Unmarshal([]byte(insight.PackageManagers), &packageManagers)
+	}
+	if insight.TestFrameworks != "" && insight.TestFrameworks != "null" && insight.TestFrameworks != "[]" {
+		_ = json.Unmarshal([]byte(insight.TestFrameworks), &testFrameworks)
+	}
+
+	pkg := ""
+	if len(packageManagers) > 0 {
+		pkg = packageManagers[0]
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"repository_full_name": repo.FullName,
+		"has_insight":          true,
+		"detected_technologies": gin.H{
+			"primary_language": insight.PrimaryLanguage,
+			"frameworks":       frameworks,
+			"build_tools":      buildTools,
+			"package_manager":  pkg,
+			"test_framework":   ifFirst(testFrameworks),
+		},
+		"detected_architecture": gin.H{
+			"architecture_type": insight.ArchitectureType,
+		},
+		"detected_architecture_type": insight.ArchitectureType,
+		"detected_deployment": gin.H{
+			"docker":         insight.HasDockerfile,
+			"kubernetes":     insight.HasKubernetes,
+			"terraform":      insight.HasTerraform,
+			"helm":           false,
+			"cloud_provider": nil,
+		},
+		"recommended_deployment_target": nil,
+		"detected_domain":               "general",
+		"domain_sub_type":               "none",
+		"domain_confidence":             0.0,
+		"domain_threats":                []string{},
+		"features":                      []string{},
+		"security_coverages":            []gin.H{},
+		"pipeline_augmentations":        []gin.H{},
+		"generated_workflow":            "",
+		"generated_stages":              []string{},
+		"validation_passed":             true,
+		"errors":                        []string{},
+		"_source":                       "go_repository_insight",
+	})
+}
+
+// ifFirst returns the first element of a string slice, or "" if
+// the slice is empty. Tiny helper to keep the JSON shape tidy.
+func ifFirst(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
+}
+
 func calcSuccessRate(runs []models.PipelineRun) float64 {
 	if len(runs) == 0 {
 		return 0
