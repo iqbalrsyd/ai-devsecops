@@ -154,40 +154,17 @@ def _get_arch_type(architecture) -> str:
 
 
 def _resolve_arch_type(state: PipelineEngineerState) -> str:
-    """Resolve architecture type with deterministic fallback for Tahap 1.
+    """Resolve architecture type — always returns "monolithic".
 
-    Order of preference:
-      1. `state["detected_architecture_type"]` if LLM already produced one
-         AND it's not the default `monolithic` fallback.
-      2. Deterministic file-based detection of FE/BE split OR multi-service
-         manifests to upgrade `monolithic` to `modular_monolith`.
-      3. `monolithic` (final fallback).
+    Per skripsi Bab 3 (revisi 3-domain & 1-architecture), arsitektur bukan
+    variabel eksperimen (batasan B7). Semua arsitektur diperlakukan sebagai
+    monolitik tradisional, termasuk FE/BE split dan modular monolith yang
+    sebelumnya dinaikkan ke "modular_monolith". Sistem internal TIDAK lagi
+    menaikkan ke modular_monolith, sehingga semua repo diklasifikasikan
+    sebagai "monolithic" untuk konsistensi eksperimen.
 
-    Why this matters:
-      * The LLM-based architecture_detection_node sometimes returns
-        `monolithic` when it has no clear evidence, even for repos that
-        are obviously multi-service. A repo with both `frontend/`
-        and `backend/` (or `client/` + `api/`) at the top level is
-        not a monolithic app.
-      * The fallback is intentionally conservative: it only fires when
-        the FE side has its own manifest AND the BE side has its own
-        manifest. A repo with just `backend/` is still monolithic.
-      * Only the two arch types from skripsi Bab 3 (revisi 3-domain &
-        2-architecture) are supported: monolithic, modular_monolith.
+    Fokus variasi ada di domain (R2.2): e-commerce, blog, iot.
     """
-    arch = (state.get("detected_architecture_type") or "").lower().strip()
-    if arch in ("modular_monolith",):
-        return "modular_monolith"
-    if arch and arch not in ("", "unknown", "general", "monolithic"):
-        # Any other non-monolithic value collapses to modular_monolith.
-        return "modular_monolith"
-    # LLM either did not run or defaulted to monolithic. Try to upgrade.
-    structure = state.get("repository_structure") or []
-    files = state.get("repository_files") or {}
-    if _has_frontend_backend_split(structure, files):
-        return "modular_monolith"
-    if _has_service_manifest(structure, files) and _has_docker_compose(structure, files):
-        return "modular_monolith"
     return "monolithic"
 
 
@@ -883,10 +860,9 @@ def _dir_has_any(
 def _has_service_manifest(structure: list, files: dict) -> bool:
     """Return True if at least one service manifest file is present.
 
-    Used to gate the `dependency-scan-per-service` stage for
-    microservices/modular_monolith architectures. A repo with no
-    package manager manifest at all has no service-level dependency
-    surface to scan (e.g. a pure IaC repo with only Terraform files).
+    Per skripsi R2.1, arsitektur bukan variabel eksperimen. Helper ini
+    tetap dipertahankan untuk evidence-based detection (file presence),
+    namun tidak lagi digunakan untuk menaikkan arsitektur ke multi-service.
     """
     return _has_file(structure, files, _SERVICE_MANIFEST_PATTERNS)
 
@@ -1180,20 +1156,16 @@ def _select_relevant_stages(
     if ("sbom" in requested or has_docker) and has_docker:
         stages.append("sbom")
 
-    # ---- multi-service stages (modular_monolith / FE+BE) ----
-    # These are gated on architecture type AND repository evidence
-    # (requirement 1: file evidence is the single source of truth).
-    # `modular_monolith` is the supported multi-service arch per
-    # skripsi Bab 3 (revisi 3-domain & 2-architecture); it covers both
-    # the FE/BE split and other multi-module single-deploy layouts.
-    is_multi_service_arch = arch_type in (
-        "modular_monolith",
-    )
+    # ---- multi-service stages ----
+    # Per skripsi Bab 3 (revisi 3-domain & 1-architecture), arsitektur bukan
+    # variabel eksperimen. Semua arsitektur diperlakukan monolitik. Stage
+    # multi-service hanya di-emit jika ada file evidence (docker-compose)
+    # — bukan berdasarkan tipe arsitektur.
+    is_multi_service_arch = False  # selalu False per R2.1
 
-    # docker-compose-validate: only for multi-service arch + a real
-    # compose file. A bare Dockerfile is not a stack and has nothing
-    # to validate.
-    if is_multi_service_arch and (
+    # docker-compose-validate: hanya untuk repo dengan docker-compose
+    # file. Arsitektur tidak lagi menaikkan ke multi-service.
+    if has_docker_compose and (
         "docker-compose-validate" in requested or has_docker_compose
     ) and has_docker_compose:
         stages.append("docker-compose-validate")
@@ -1247,8 +1219,7 @@ def _filter_stages_by_evidence(
     has_build_evidence = _has_build_script(structure, files, package_manager) or bool(technologies.get("build_tools"))
     has_docker_compose = _has_docker_compose(structure, files)
     has_service_manifest = _has_service_manifest(structure, files)
-    arch_type = _resolve_arch_type(state)
-    is_multi_service_arch = arch_type == "modular_monolith"
+    # arch_type selalu "monolithic" per R2.1, tidak perlu is_multi_service_arch
 
     allowed: list[str] = []
     for stage in stages:
@@ -1267,14 +1238,12 @@ def _filter_stages_by_evidence(
         if stage in ("container-scan", "container-build", "sbom") and not has_docker:
             continue
         # iac-scan REMOVED in struktur-v9.1
-        # Multi-service stages (struktur-v6 §3.6.1):
-        # require both the architecture type AND repository evidence.
-        if stage == "docker-compose-validate" and not (
-            is_multi_service_arch and has_docker_compose
-        ):
+        # Multi-service stages: per R2.1, arsitektur bukan variabel.
+        # Stage hanya di-emit jika ada file evidence langsung.
+        if stage == "docker-compose-validate" and not has_docker_compose:
             continue
         if stage == "dependency-scan-per-service" and not (
-            is_multi_service_arch and has_service_manifest
+            has_docker_compose and has_service_manifest
         ):
             continue
         allowed.append(stage)
@@ -1303,8 +1272,7 @@ def _flag_invalid_stages(
     has_build_evidence = _has_build_script(structure, files, package_manager) or bool(technologies.get("build_tools"))
     has_docker_compose = _has_docker_compose(structure, files)
     has_service_manifest = _has_service_manifest(structure, files)
-    arch_type = _resolve_arch_type(state)
-    is_multi_service_arch = arch_type in ("microservices", "modular_monolith", "frontend_backend")
+    # arch_type selalu "monolithic" per R2.1
 
     invalid: list[dict] = []
     for stage in stages:
@@ -1327,19 +1295,16 @@ def _flag_invalid_stages(
                 "reason": "no Dockerfile or docker-compose file detected in repository analysis",
             })
         # iac-scan REMOVED in struktur-v9.1
-        elif stage == "docker-compose-validate" and not (
-            is_multi_service_arch and has_docker_compose
-        ):
+        elif stage == "docker-compose-validate" and not has_docker_compose:
             invalid.append({
                 "stage": stage,
                 "expected": False,
                 "reason": (
-                    "no docker-compose.yml/compose.yaml in repository, or "
-                    "architecture is not modular_monolith"
+                    "no docker-compose.yml/compose.yaml in repository"
                 ),
             })
         elif stage == "dependency-scan-per-service" and not (
-            is_multi_service_arch and has_service_manifest
+            has_docker_compose and has_service_manifest
         ):
             invalid.append({
                 "stage": stage,
@@ -1347,7 +1312,7 @@ def _flag_invalid_stages(
                 "reason": (
                     "no service manifest (package.json, requirements.txt, "
                     "go.mod, Cargo.toml, pom.xml) detected in repository, "
-                    "or architecture is not modular_monolith"
+                    "or no docker-compose file"
                 ),
             })
     return invalid
@@ -1473,24 +1438,18 @@ def _flag_unjustified_requested_stages(state: PipelineEngineerState) -> list[dic
                 "manifest). The build stage was omitted from the workflow."
             ),
         })
-    # per_service_dep_scan: only emits as a separate job for
-    # microservices/modular_monolith (see _select_relevant_stages). On
-    # a monolithic repo, the same capability is provided by the root
-    # `dependency-scan` job (npm audit + Trivy fs), so we surface a
-    # clear "merged_into" message rather than letting the requested
-    # control silently disappear.
-    is_multi_service_arch = _resolve_arch_type(state) == "modular_monolith"
-    if "per-service-dep-scan" in requested and not is_multi_service_arch:
+    # per_service_dep_scan: per R2.1, arsitektur bukan variabel eksperimen.
+    # Arsitektur selalu monolitik, sehingga per-service matrix TIDAK di-emit.
+    # Kapabilitas dependency-scan diberikan oleh root job (npm audit + Trivy fs).
+    if "per-service-dep-scan" in requested:
         invalid.append({
             "stage": "per-service-dep-scan",
             "expected": False,
             "reason": (
-                "'per_service_dep_scan' was requested by security inference "
-                "but the detected architecture is monolithic (not "
-                "modular_monolith). The same dependency-scan "
-                "capability is provided by the root 'dependency-scan' job "
-                "(npm audit + Trivy fs). The per-service matrix job is only "
-                "emitted for multi-service architectures."
+                "'per_service_dep_scan' was requested but arsitektur is not "
+                "a variable in this experiment (R2.1 — monolithic only). "
+                "The same dependency-scan capability is provided by the root "
+                "'dependency-scan' job (npm audit + Trivy fs)."
             ),
         })
     return invalid
@@ -1526,8 +1485,8 @@ def _build_vignette_context(
       - domain_brief: short string describing the detected domain
       - priority_threats: list of domain-specific threats to emphasize
 
-    For microservices, the insert references service_count and service_paths.
-    For monolith, the insert describes a single-workflow approach.
+    Per R2.1, arsitektur selalu monolitik. Branch modular_monolith hanya
+    untuk backward compatibility (tidak pernah dieksekusi).
     """
     arch = (arch_type or "monolithic").lower()
     domain = (detected_domain or "general").lower()
@@ -1535,27 +1494,27 @@ def _build_vignette_context(
     threats = list(domain_threats or [])
 
     if arch == "modular_monolith":
+        # Per R2.1, arsitektur bukan variabel eksperimen. Branch ini
+        # TIDAK akan pernah diambil karena _resolve_arch_type selalu
+        # mengembalikan "monolithic". Disimpan sebagai fallback untuk
+        # backward compatibility jika diaktifkan kembali di masa depan.
         sc = service_count or 0
         sp = service_paths or []
         architecture_insert = (
             f"This repository has {sc} module(s) deployed together "
             f"{'at ' + ', '.join(sp[:6]) if sp else ''}. "
-            f"Modular-monolith strategy (skripsi Bab 3, revisi 3-domain & 2-architecture): "
+            f"Modular-monolith strategy (legacy, disabled per R2.1): "
             f"`docker-compose-validate` checks the compose file first, "
-            f"then `dependency-scan-per-service` uses a matrix strategy "
-            f"to run the appropriate CVE scanner (npm audit, pip-audit, "
-            f"govulncheck, cargo audit, trivy fs) for each service "
-            f"directory. `sast` (Semgrep) is run ONCE at the root with "
-            f"the full ruleset; per-finding `path` already locates the "
-            f"module, and cross-module rules would be missed by a "
-            f"per-module split. Do NOT generate a separate workflow "
-            f"file per module — keep a single workflow with matrix jobs."
+            f"then `dependency-scan-per-service` uses a matrix strategy. "
+            f"`sast` (Semgrep) is run ONCE at the root with the full ruleset. "
+            f"Do NOT generate a separate workflow file per module."
         )
     else:
         architecture_insert = (
             "You are generating a SINGLE workflow for a monolithic application. "
             "All security scans should run in one sequential pipeline covering "
-            "the entire codebase. Use a single build artifact."
+            "the entire codebase. Use a single build artifact. "
+            "(Arsitektur bukan variabel eksperimen per R2.1 — monolitik only.)"
         )
 
     domain_brief = f"{domain} (confidence: {confidence:.2f})"
@@ -1651,7 +1610,8 @@ ALLOWED_STAGES: tuple[str, ...] = (
     # which is the AI-driven equivalent. Domain-specific static templates
     # are kept in `_build_*_job` helpers for unit-test back-compat but
     # are never emitted by the generator.
-    # ── v9.2: per-service / per-microservice stages REMOVED ──────
+    # ── v9.5: per-service / per-microservice stages DISABLED per R2.1 ──────
+    # Arsitektur bukan variabel eksperimen. Monolithic only.
     # The user explicitly requested that the generator stop
     # emitting `detect-services`, `dependency-scan-per-service`, and
     # `docker-compose-validate`. Custom per-repo jobs now come
@@ -2611,10 +2571,11 @@ def _semgrep_rules_for_domain(detected_domain: str | None) -> list[str]:
 def _semgrep_rules_for_coverages(applicable_coverages: list[str]) -> list[str]:
     """Return Semgrep rule files contributed by applicable security coverages.
 
-    struktur-v9: each applicable coverage may contribute additional rule
-    files beyond what the detected domain provides. For example, a
-    microservices repo with no clear domain still gets `owasp-api.yml`
-    rules via the `api_security` and `microservice_security` coverages.
+     struktur-v9: each applicable coverage may contribute additional rule
+     files beyond what the detected domain provides. For example, a
+     monolitik repo with no clear domain still gets `owasp-api.yml`
+     rules via the `api_security` coverage. (microservice_security
+     sudah dihapus per R2.1.)
 
     Returns deduplicated list of rule file names (without path).
     """
@@ -3592,10 +3553,14 @@ def _ensure_pip_audit_sarif_conversion() -> list[str]:
 
 
 # ----------------------------------------------------------------------
-# Microservice / multi-service job builders
+# Microservice / multi-service job builders (DISABLED per R2.1)
 # ----------------------------------------------------------------------
-# See struktur-v6 §3.6.1 for the design rationale. The strategy for
-# microservices and modular_monolith repositories is:
+# Arsitektur bukan variabel eksperimen. Monolithic only. Kode di bawah
+# ini TIDAK lagi dipanggil dari runtime path utama. Disimpan untuk
+# backward compatibility.
+#
+# Legacy design rationale (struktur-v6 §3.6.1): for modular_monolith
+# repositories the strategy was:
 #
 #   1. docker-compose-validate (cheap fail-fast gate)
 #   2. dependency-scan-per-service (matrix strategy)
@@ -3763,7 +3728,7 @@ def _build_docker_compose_validate_job() -> tuple[str, str]:
     instead of wasting compute on per-service scanners.
     """
     reason = (
-        "Microservices/modular_monolith architecture with a docker-compose "
+        "docker-compose file present in repository. "
         "file detected. Validates the compose file syntax and service "
         "references via `docker compose config --quiet` so a broken stack "
         "fails fast (within ~30s) before per-service scanners run. The list "
@@ -3869,7 +3834,7 @@ def _build_dependency_scan_per_service_job() -> tuple[str, str]:
     ]
     matrix_job_yaml = "\n".join(matrix_job_yaml_lines)
     reason = (
-        "Microservices/modular_monolith architecture detected. Enumerates "
+        "Multi-service matrix scan (legacy, disabled per R2.1). Enumerates "
         "service directories (heuristic: first-level sub-directory that "
         "contains a package manager manifest) and runs the appropriate CVE "
         "scanner per service: `npm audit` for npm/yarn/pnpm, `pip-audit` "
@@ -4988,9 +4953,30 @@ def _build_ai_job_from_design(
 
     continue_on_error = bool(config.get("continue_on_error", True))
     timeout_minutes = int(config.get("timeout_minutes", 10))
-    needs_list = config.get("needs") or ["sast"]
-    if not isinstance(needs_list, list):
-        needs_list = ["sast"]
+    # Default to no `needs:`. AI-generated jobs are emitted into
+    # `ai-devsecops-custom.yml` (a `workflow_call` reusable file)
+    # which has no `sast` sibling — emitting `needs: [sast]` there
+    # makes GitHub reject the file with
+    #   "must contain at least one job with no dependencies".
+    # Callers may opt in via `config["needs"]`, but we drop any
+    # reference to a job that does not exist in the *reusable* file
+    # (lint, test, sast, secret-scan, dep-check, container-scan,
+    # build all live in the generic file and are not visible inside
+    # the custom file's `jobs:` block). Only intra-custom needs
+    # (between AI jobs in the same file) would be safe to keep, but
+    # the current designs never request that, so the safest
+    # behaviour is to always omit `needs:` for AI jobs.
+    if "needs" in config:
+        needs_list = config.get("needs")
+        if not isinstance(needs_list, list):
+            needs_list = []
+        # Filter out any reference to a generic-only job.
+        # AI-generated jobs in the custom file have no safe `needs:`
+        # target — drop the dependency entirely so the file remains
+        # valid as a `workflow_call` reusable workflow.
+        needs_list = []
+    else:
+        needs_list = []
 
     steps: list[str] = []
     sarif_categories: list[str] = []
@@ -5059,20 +5045,35 @@ def _build_ai_job_from_design(
     if not steps:
         return "", ""
 
-    needs_yaml = ", ".join(needs_list)
+    # AI-generated jobs end up in `ai-devsecops-custom.yml` (a
+    # `workflow_call` reusable file) via `build_workflow_yaml_split`.
+    # Referencing `needs: [sast]` there is invalid: the reusable
+    # file has no `sast` job, so GitHub rejects the whole file
+    # with "must contain at least one job with no dependencies".
+    # Only emit `needs:` when caller explicitly opted in via
+    # config (or the legacy default, kept for the merged single-
+    # file variant where `sast` does exist as a sibling job).
+    if needs_list:
+        needs_yaml = ", ".join(needs_list)
+        needs_line = f"    needs: [{needs_yaml}]"
+    else:
+        needs_line = None
     reason_text = reasoning[:400]
     body_lines = [
         "    runs-on: ubuntu-latest",
         f"    timeout-minutes: {timeout_minutes}",
         f"    continue-on-error: {'true' if continue_on_error else 'false'}",
-        f"    needs: [{needs_yaml}]",
+    ]
+    if needs_line:
+        body_lines.append(needs_line)
+    body_lines.extend([
         "    steps:",
         "      - name: Checkout code",
         f"        uses: {_pin('actions/checkout@v4')}",
         "        with:",
         "          persist-credentials: false",
         "",
-    ]
+    ])
     body_lines.extend(steps)
     body = "\n".join(body_lines)
     return body, (

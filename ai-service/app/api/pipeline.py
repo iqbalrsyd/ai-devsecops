@@ -21,7 +21,7 @@ router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
 
 @router.post("/repo/analyze")
-async def analyze_repository(request: dict):
+def analyze_repository(request: dict):
     repo = request.get("repository_full_name", "")
     token = request.get("github_token", "")
     if not repo:
@@ -34,7 +34,7 @@ async def analyze_repository(request: dict):
 
 
 @router.post("/repo/pipeline")
-async def repo_pipeline(request: dict):
+def repo_pipeline(request: dict):
     repo = request.get("repository_full_name", "")
     token = request.get("github_token", "")
     auto_deploy = request.get("auto_deploy", False)
@@ -52,7 +52,7 @@ async def repo_pipeline(request: dict):
 
 
 @router.post("/generate")
-async def generate_workflow(request: dict):
+def generate_workflow(request: dict):
     repo = request.get("repository_id", "")
     token = request.get("github_token", "")
     project_id = request.get("project_id", "")
@@ -80,7 +80,7 @@ async def generate_workflow(request: dict):
 
 
 @router.post("/deploy")
-async def deploy_workflow(request: dict):
+def deploy_workflow(request: dict):
     repo = request.get("repository_id", "")
     token = request.get("github_token", "")
     workflow_yaml = request.get("workflow_yaml", "")
@@ -106,7 +106,7 @@ async def deploy_workflow(request: dict):
 
 
 @router.post("/execute")
-async def execute_workflow(request: dict):
+def execute_workflow(request: dict):
     repo = request.get("repository_id", "")
     token = request.get("github_token", "")
     workflow_run_id = request.get("workflow_run_id")
@@ -124,7 +124,7 @@ async def execute_workflow(request: dict):
 
 
 @router.post("/validate")
-async def validate_workflow(request: dict):
+def validate_workflow(request: dict):
     workflow_yaml = request.get("workflow_yaml", "")
     if not workflow_yaml:
         raise HTTPException(status_code=400, detail="workflow_yaml is required")
@@ -233,7 +233,7 @@ async def get_node_specs(tahap: int | None = None):
 
 
 @router.get("/latest-run")
-async def get_latest_run(repository_id: str = "", github_token: str = ""):
+def get_latest_run(repository_id: str = "", github_token: str = ""):
     if not repository_id:
         raise HTTPException(status_code=400, detail="repository_id is required")
     from app.services.github_service import get_latest_workflow_run
@@ -244,7 +244,7 @@ async def get_latest_run(repository_id: str = "", github_token: str = ""):
 
 
 @router.get("/status/{run_id}")
-async def get_status(run_id: int, repository_id: str = "", github_token: str = ""):
+def get_status(run_id: int, repository_id: str = "", github_token: str = ""):
     try:
         run = get_workflow_run(repository_id, run_id, github_token)
         if not run:
@@ -280,7 +280,7 @@ async def stream_status(run_id: int, repository_id: str = "", github_token: str 
 
 
 @router.get("/logs/{run_id}")
-async def get_logs(run_id: int, repository_id: str = "", github_token: str = ""):
+def get_logs(run_id: int, repository_id: str = "", github_token: str = ""):
     try:
         logs = get_workflow_logs(repository_id, run_id, github_token)
         return {"logs": logs}
@@ -289,7 +289,7 @@ async def get_logs(run_id: int, repository_id: str = "", github_token: str = "")
 
 
 @router.post("/analyze/{run_id}")
-async def analyze_results(run_id: int, request: dict):
+def analyze_results(run_id: int, request: dict):
     repo = request.get("repository_id", "")
     token = request.get("github_token", "")
     project_id = request.get("project_id")
@@ -315,7 +315,7 @@ async def analyze_results(run_id: int, request: dict):
 
 
 @router.get("/analysis/{run_id}")
-async def get_analysis(run_id: int):
+def get_analysis(run_id: int):
     try:
         result = get_saved_analysis(run_id)
         if not result:
@@ -328,7 +328,7 @@ async def get_analysis(run_id: int):
 
 
 @router.post("/analyze-execution/{run_id}")
-async def analyze_execution(run_id: int, request: dict):
+def analyze_execution(run_id: int, request: dict):
     repo = request.get("repository_id", "")
     token = request.get("github_token", "")
     workflow_jobs = request.get("workflow_jobs", "")
@@ -350,7 +350,7 @@ async def analyze_execution(run_id: int, request: dict):
 
 
 @router.post("/compliance")
-async def check_workflow_compliance(request: dict):
+def check_workflow_compliance(request: dict):
     workflow_yaml = request.get("workflow_yaml", "")
     repo_name = request.get("repository_full_name", "")
     if not workflow_yaml:
@@ -456,33 +456,105 @@ async def generate_run_pdf(run_id: str, request: dict | None = None):
     findings list, attaches CVSS via `cvss_mapper`, and returns the
     generated PDF as a base64-encoded payload so the FE can offer a
     direct download.
+
+    Bab 5.13.3 (v9.5): robust fetch — when the body is missing or has
+    empty fields (e.g. the FE sent a payload that came from a
+    half-populated state, or the AI service was unreachable when the
+    user clicked the button), we try to backfill the missing fields
+    from the database (pipeline_analyses + repositories) so the PDF
+    has *something* to render. If the DB lookup also fails, the
+    endpoint still returns 200 with a placeholder PDF + a `synthetic`
+    flag so the FE can tell the user.
     """
     from app.services.report_generator import generate_pdf_report
 
     body = request or {}
     repo_name = body.get("repository_full_name") or body.get("repository_id") or "unknown"
     run_id_value = body.get("run_id") or run_id
+    fetch_warnings: list[str] = []
+
+    # v9.5: detect which body fields are empty/missing so we know
+    # whether to attempt a DB lookup. The FE may pass an empty body
+    # (e.g. when only `runId` is in the URL) — in that case we
+    # must rely on the DB or return a helpful error.
+    body_has_data = any(
+        body.get(k) for k in (
+            "detected_technologies", "detected_architecture",
+            "detected_deployment", "detected_domain",
+            "security_coverages", "findings",
+            # Also accept the BE legacy names — the FE used to send
+            # these before the v9.5 alias was added in
+            # `_build_pipeline_response`.
+            "technologies", "architecture", "architecture_detail",
+        )
+    )
+
+    # v9.5 (Bab 5.13.5): the FE `RepoPipelineResult` interface
+    # expects `detected_*` prefixed names, but the BE used to
+    # return `technologies` / `architecture` (string) /
+    # `architecture_detail` (dict) instead. Accept BOTH names so
+    # the PDF endpoint works with the new FE payload *and* any
+    # older cached payload (e.g. from `localStorage` or the
+    # `repoPipelineSummary` Go-side fallback).
+    detected_technologies = (
+        body.get("detected_technologies")
+        or body.get("technologies")
+        or {}
+    )
+    arch_raw = body.get("detected_architecture")
+    if not arch_raw:
+        arch_detail = body.get("architecture_detail")
+        arch_string = body.get("architecture")
+        if isinstance(arch_detail, dict):
+            arch_raw = dict(arch_detail)
+            arch_raw.setdefault("architecture_type", arch_string or "monolithic")
+        elif isinstance(arch_string, str):
+            arch_raw = {"architecture_type": arch_string}
+        else:
+            arch_raw = {"architecture_type": "monolithic"}
+    detected_architecture_type = (
+        body.get("detected_architecture_type")
+        or (arch_raw.get("architecture_type") if isinstance(arch_raw, dict) else None)
+        or "monolithic"
+    )
+    detected_deployment = (
+        body.get("detected_deployment")
+        or body.get("deployment")
+        or {}
+    )
+    detected_domain = (
+        body.get("detected_domain")
+        or body.get("domain")
+        or "general"
+    )
 
     state: dict = {
         "repository_full_name": repo_name,
         "run_id": run_id_value,
+        "github_run_id": run_id_value,
         "repository_description": body.get("repository_description", ""),
-        "detected_technologies": body.get("detected_technologies", {}),
-        "detected_architecture": body.get("detected_architecture", {}),
-        "detected_architecture_type": body.get("detected_architecture_type", "monolithic"),
-        "detected_deployment": body.get("detected_deployment", {}),
+        "detected_technologies": detected_technologies,
+        "detected_architecture": arch_raw,
+        "detected_architecture_type": detected_architecture_type,
+        "detected_deployment": detected_deployment,
         "recommended_deployment_target": body.get("recommended_deployment_target"),
-        "detected_domain": body.get("detected_domain", "general"),
+        "detected_domain": detected_domain,
         "domain_sub_type": body.get("domain_sub_type", "none"),
         "domain_confidence": body.get("domain_confidence", 0.0),
+        "domain_evidence": body.get("domain_evidence", []),
         "domain_threats": body.get("domain_threats", []),
         "features": body.get("features", []),
+        "attack_surfaces": body.get("attack_surfaces", []),
         "security_coverages": body.get("security_coverages", []),
         "ai_generated_rules": body.get("ai_generated_rules", []),
+        "llm_generated_rules": body.get("llm_generated_rules", []),
         "pipeline_augmentations": body.get("pipeline_augmentations", []),
         "job_designs": body.get("job_designs", []),
         "generated_workflow": body.get("generated_workflow", ""),
+        "generated_workflow_generic": body.get("generated_workflow_generic", ""),
+        "generated_workflow_custom": body.get("generated_workflow_custom", ""),
         "generated_stages": body.get("generated_stages", []),
+        "stage_explanations": body.get("stage_explanations", []),
         "validation_passed": body.get("validation_passed", True),
         "validation_errors": body.get("validation_errors", []),
         "validation_warnings": body.get("validation_warnings", []),
@@ -495,11 +567,38 @@ async def generate_run_pdf(run_id: str, request: dict | None = None):
         "security_coverage_score": body.get("security_coverage_score"),
         "severity_breakdown": body.get("severity_breakdown", {}),
         "recommendations": body.get("recommendations", []),
+        "summary": body.get("summary", ""),
     }
 
-    # Bab 5.13.3: tag every finding with CVSS before rendering the PDF
-    # so the cover page and the security section can show the per-bucket
-    # sum and the per-finding badges.
+    # v9.5: when the body is empty (e.g. FE only sent run_id in the
+    # URL, or the user clicked "Generate PDF" before the pipeline
+    # data loaded), try to backfill from the database. This is the
+    # fix for "PDF generation failed because fetching failed to get
+    # pipeline_id / run_id" — we now look up ourselves instead of
+    # relying on the FE to send everything.
+    if not body_has_data:
+        try:
+            from app.services.report_state_lookup import lookup_run_state
+            db_state = await lookup_run_state(
+                run_id=run_id_value,
+                repository_full_name=repo_name,
+            )
+            if db_state:
+                # Merge: only fill in fields the body did not provide.
+                for k, v in db_state.items():
+                    if not state.get(k) and v:
+                        state[k] = v
+                        fetch_warnings.append(f"backfilled {k} from DB")
+                if not state.get("repository_full_name") or state["repository_full_name"] == "unknown":
+                    state["repository_full_name"] = db_state.get(
+                        "repository_full_name", repo_name
+                    )
+        except Exception as e:
+            fetch_warnings.append(f"DB lookup failed: {e}")
+
+    # v9.5: tag every finding with CVSS before rendering the PDF
+    # so the cover page and the security section can show the
+    # per-bucket sum and the per-finding badges.
     try:
         from app.agents.cvss_mapper import score_findings
         from app.services.github_service import normalize_code_scanning_alerts_with_summary
@@ -510,13 +609,52 @@ async def generate_run_pdf(run_id: str, request: dict | None = None):
             )
             state["code_scanning_alerts"] = wrapped["alerts"]
             state["cvss_breakdown"] = wrapped["cvss_breakdown"]
-    except Exception:
-        pass
+    except Exception as e:
+        fetch_warnings.append(f"CVSS tagging skipped: {e}")
+
+    # v9.5: enrich findings[].security_coverage via the new
+    # coverage_library helpers so §4.2 + §5.3 of the PDF can show
+    # the coverage column without the reader having to look up the
+    # CWE manually.
+    try:
+        from app.agents.coverage_library import (
+            resolve_coverage_for_cwe, resolve_coverage_for_rule,
+        )
+        for f in state.get("findings") or []:
+            if not isinstance(f, dict):
+                continue
+            if f.get("security_coverage"):
+                continue
+            cwe = f.get("cwe")
+            rule_id = f.get("rule_id") or f.get("type")
+            cov = None
+            if cwe:
+                cov = resolve_coverage_for_cwe(cwe)
+            if not cov and rule_id:
+                cov = resolve_coverage_for_rule(rule_id)
+            if cov:
+                f["security_coverage"] = cov
+    except Exception as e:
+        fetch_warnings.append(f"coverage enrichment skipped: {e}")
+
+    # v9.5: tag the state with `synthetic=True` if we still have
+    # almost nothing — the PDF generator uses this flag to render
+    # a "Pipeline metadata was not available" note on the cover
+    # (it already does this when key fields are empty).
+    if not any(state.get(k) for k in (
+        "detected_technologies", "detected_architecture",
+        "security_coverages", "generated_stages",
+    )):
+        state["synthetic"] = True
+        fetch_warnings.append("rendering synthetic PDF (no pipeline data)")
 
     try:
         pdf_path = generate_pdf_report(state)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF generation failed: {e}. fetch_warnings={fetch_warnings}",
+        )
 
     try:
         with open(pdf_path, "rb") as f:
@@ -529,13 +667,15 @@ async def generate_run_pdf(run_id: str, request: dict | None = None):
             "size": len(pdf_bytes),
             "content_type": "application/pdf",
             "content_base64": encoded,
+            "fetch_warnings": fetch_warnings,
+            "synthetic": bool(state.get("synthetic")),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF readback failed: {e}")
 
 
 @router.post("/recommend")
-async def generate_per_vuln_recommendation(request: dict):
+def generate_per_vuln_recommendation(request: dict):
     """Generate a per-vulnerability fix recommendation via the LLM.
 
     The FE calls this from the RunDetail page when the user

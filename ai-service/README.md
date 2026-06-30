@@ -33,7 +33,7 @@
 | `primary_language` | `javascript` | `technology_detection_node` |
 | `package_manager` | `npm`, `pip`, `maven` | `technology_detection_node` |
 | `test_framework` | `jest`, `pytest` | `technology_detection_node` |
-| `architecture_type` | `monolithic`, `microservices` | `architecture_detection_node` |
+| `architecture_type` | `monolithic` (only, per R2.1) | `architecture_detection_node` |
 | `detected_domain` | `e-commerce`, `healthcare`, `fintech`, … | `domain_detection_node` |
 | `domain_threats[]` | `["Stripe key hardcoded", "SQL injection in checkout"]` | `domain_detection_node` (LLM atau heuristic) |
 | `attack_surfaces[]` | `["/api/checkout", "/api/payment"]` | `security_requirement_inference_node` |

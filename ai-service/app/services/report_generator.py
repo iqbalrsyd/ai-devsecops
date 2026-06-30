@@ -87,11 +87,24 @@ def generate_pdf_report(
     state: dict[str, Any],
     output_path: str | None = None,
 ) -> str:
-    """Generate a PDF report from the pipeline state and return the file path."""
+    """Generate a PDF report from the pipeline state and return the file path.
+
+    v9.5 (Bab 5.13.5): graceful degradation. The state dict can be
+    partial (e.g. when the AI service was unreachable and the BE
+    could not backfill from the DB). When key fields are missing
+    we still render a PDF — the cover page and Section 1.4 will
+    show placeholder text, but the user always gets a downloadable
+    file instead of a 500 error.
+    """
 
     repo_name = state.get("repository_full_name", "unknown-repo")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    if not repo_name or repo_name in ("unknown", "unknown-repo", ""):
+        # v9.5: synthesise a label instead of letting the filename
+        # become `_.pdf`. The cover page will still say "unknown-repo"
+        # but the file is at least identifiable.
+        repo_name = f"report-{timestamp}"
     if output_path is None:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         reports_dir = os.environ.get("REPORTS_DIR", "/tmp/reports")
         os.makedirs(reports_dir, exist_ok=True)
         safe_name = repo_name.replace("/", "_").replace("\\", "_")
@@ -118,6 +131,48 @@ def generate_pdf_report(
     styles.add(_cell_style())
     styles.add(_header_cell_style())
     styles.add(_footer_style())
+
+    # v9.5 (Bab 5.13.5): defensive defaults for fields that may
+    # be missing when the PDF is generated from a half-populated
+    # state (e.g. the AI service was unreachable and the BE could
+    # not backfill from the DB). Without these defaults, downstream
+    # code crashes on `None.get("foo")` and the whole PDF build
+    # fails — which is the bug the user reported.
+    if not isinstance(state, dict):
+        state = {}
+    state.setdefault("repository_full_name", repo_name)
+    state.setdefault("run_uuid", state.get("run_id") or state.get("github_run_id") or "—")
+    state.setdefault("pipeline_id", None)
+    state.setdefault("pipeline_version", "v9.5")
+    state.setdefault("github_run_id", None)
+    state.setdefault("run_created_at", None)
+    state.setdefault("errors", [])
+    state.setdefault("detected_technologies", {})
+    state.setdefault("detected_architecture", {})
+    state.setdefault("detected_architecture_type", "monolithic")
+    state.setdefault("detected_deployment", {})
+    state.setdefault("detected_domain", "general")
+    state.setdefault("domain_evidence", [])
+    state.setdefault("domain_threats", [])
+    state.setdefault("features", [])
+    state.setdefault("security_coverages", [])
+    state.setdefault("pipeline_augmentations", [])
+    state.setdefault("job_designs", [])
+    state.setdefault("ai_generated_rules", [])
+    state.setdefault("llm_generated_rules", [])
+    state.setdefault("generated_workflow", "")
+    state.setdefault("generated_stages", [])
+    state.setdefault("stage_explanations", [])
+    state.setdefault("validation_passed", True)
+    state.setdefault("validation_errors", [])
+    state.setdefault("validation_warnings", [])
+    state.setdefault("findings", [])
+    state.setdefault("code_scanning_alerts", [])
+    state.setdefault("dashboard_findings", {})
+    state.setdefault("cvss_breakdown", [])
+    state.setdefault("recommendations", [])
+    state.setdefault("summary", "")
+    state.setdefault("synthetic", False)
 
     elements: list = []
     elements += _build_cover_page(repo_name, state, styles)
@@ -634,22 +689,65 @@ def _build_section2_security_requirements(state: dict, styles: dict) -> list:
             styles["Normal"],
         ))
         elements.append(Spacer(1, 2 * mm))
-        cov_rows = [["Coverage ID", "Status", "Reason"]]
+        # v9.5 (Bab 5.13.5 — table fix): previous version used
+        # colWidths=[130, 70, 300]mm — total 500mm on a 170mm
+        # printable A4 page. Reportlab auto-collapsed the
+        # overflowing columns to keep within the page width,
+        # so the "Coverage ID" and "Status" columns were
+        # hidden in the rendered PDF. New widths fit within
+        # the 170mm budget with 1mm padding total.
+        cov_rows = [["Coverage ID", "Status", "Mapped CWE", "Reason"]]
+        # Pre-compute per-coverage CWE count from RULE_TO_COVERAGE
+        # + CWE_TO_COVERAGE so the reader can see which coverages
+        # are most CWE-rich (proxy for "deep coverage").
+        from app.agents.coverage_library import (
+            RULE_TO_COVERAGE, CWE_TO_COVERAGE,
+        )
+        cwe_per_coverage: dict[str, set] = {}
+        for cwe, cov in CWE_TO_COVERAGE.items():
+            cwe_per_coverage.setdefault(cov, set()).add(cwe)
+        rule_per_coverage: dict[str, int] = {}
+        for rule, cov in RULE_TO_COVERAGE.items():
+            rule_per_coverage[cov] = rule_per_coverage.get(cov, 0) + 1
         for c in coverages:
+            cov_id = _safe(c, "id", "—")
+            n_cwe = len(cwe_per_coverage.get(cov_id, set()))
+            n_rule = rule_per_coverage.get(cov_id, 0)
+            mapped_cwe_text = (
+                f"{n_cwe} CWE, {n_rule} rules" if (n_cwe or n_rule) else "—"
+            )
             cov_rows.append([
-                Paragraph(_escape_xml(_safe(c, "id", "—")), styles["Cell"]),
-                Paragraph(_escape_xml("applicable" if _safe(c, "applicable", False) else "n/a"), styles["Cell"]),
-                Paragraph(_escape_xml(_safe(c, "reason", "—")[:160]), styles["Cell"]),
+                Paragraph(_escape_xml(cov_id), styles["Cell"]),
+                Paragraph(
+                    _escape_xml("applicable" if _safe(c, "applicable", False) else "n/a"),
+                    styles["Cell"],
+                ),
+                Paragraph(_escape_xml(mapped_cwe_text), styles["Cell"]),
+                Paragraph(_escape_xml(_safe(c, "reason", "—")[:200]), styles["Cell"]),
             ])
-        cov_table = Table(cov_rows, colWidths=[130 * mm, 70 * mm, 300 * mm], repeatRows=1)
+        # 4-column layout. Total 170mm exactly. Wider "Reason"
+        # column (~95mm) for the long LLM-generated rationale;
+        # narrower Coverage ID / Status / Mapped CWE columns.
+        cov_table = Table(
+            cov_rows,
+            colWidths=[40 * mm, 20 * mm, 22 * mm, 88 * mm],
+            repeatRows=1,
+        )
         cov_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a237e")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
+            ("FONTSIZE", (0, 1), (-1, -1), 7),
+            ("ALIGN", (0, 0), (-1, 0), "LEFT"),
+            ("ALIGN", (1, 1), (1, -1), "CENTER"),
+            ("ALIGN", (2, 1), (2, -1), "CENTER"),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ]))
         elements.append(cov_table)
         elements.append(Spacer(1, 4 * mm))
@@ -664,23 +762,41 @@ def _build_section2_security_requirements(state: dict, styles: dict) -> list:
             styles["Normal"],
         ))
         elements.append(Spacer(1, 2 * mm))
+        # v9.5 (Bab 5.13.5 — table fix): same overflow bug as
+        # §2.1. Previous colWidths=[110, 80, 200, 130] = 520mm
+        # on a 170mm page, so "Coverage" + "Job" + "Reason"
+        # columns were collapsed. New layout: 4 columns that
+        # fit in 170mm total.
         aug_rows = [["Coverage", "Job", "Configuration", "Reason"]]
         for a in augmentations:
             aug_rows.append([
                 Paragraph(_escape_xml(_safe(a, "coverage", "—")), styles["Cell"]),
                 Paragraph(_escape_xml(_safe(a, "job", "—")), styles["Cell"]),
-                Paragraph(_escape_xml(_safe(a, "configuration", "—")[:140]), styles["Cell"]),
-                Paragraph(_escape_xml(_safe(a, "reason", "—")[:120]), styles["Cell"]),
+                Paragraph(_escape_xml(_safe(a, "configuration", "—")[:100]), styles["Cell"]),
+                Paragraph(_escape_xml(_safe(a, "reason", "—")[:80]), styles["Cell"]),
             ])
-        aug_table = Table(aug_rows, colWidths=[110 * mm, 80 * mm, 200 * mm, 130 * mm], repeatRows=1)
+        # Total 170mm. Coverage (40mm) + Job (20mm) + Configuration
+        # (75mm) + Reason (35mm) = 170mm. Configuration is the
+        # longest free-form string; Reason is short per spec.
+        aug_table = Table(
+            aug_rows,
+            colWidths=[40 * mm, 20 * mm, 75 * mm, 35 * mm],
+            repeatRows=1,
+        )
         aug_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a237e")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
+            ("FONTSIZE", (0, 1), (-1, -1), 7),
+            ("LEADING", (0, 1), (-1, -1), 9),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("ALIGN", (1, 1), (1, -1), "CENTER"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ]))
         elements.append(aug_table)
         elements.append(Spacer(1, 4 * mm))

@@ -158,7 +158,7 @@ Domain **fintech, healthcare, education** sudah dihapus dari sistem pada revisi 
 | **Monolitik Tradisional** | Express monolith, single Dockerfile | Single SAST job, no matrix |
 | **Modular Monolith** | Per-service Dockerfiles, API gateway, K8s manifests | Matrix SAST per-service, `per_service_sast`, `service_mesh_audit` |
 
-> Arsitektur **Microservices murni, Service-Based, Event-Driven, Serverless** di-skip (lihat naskah R2.1 — pengerucutan dari 6 → 2 tipe). Alasan: microservices murni relatif jarang di repositori open-source JS/TS, dan dampaknya terhadap isolasi pemindaian SAST/SCA serupa dengan modular monolith.
+> Arsitektur **Microservices murni, Service-Based, Event-Driven, Serverless** di-skip (lihat naskah R2.1 — pengerucutan dari 6 → 1 tipe: monolitik). Alasan: microservices murni relatif jarang di repositori open-source JS/TS, dan arsitektur bukan variabel eksperimen (batasan B7).
 
 ---
 

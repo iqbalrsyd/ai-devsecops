@@ -240,3 +240,58 @@ def test_generic_and_custom_stage_names_disjoint():
     would emit the same job in both files."""
     overlap = GENERIC_STAGE_NAMES & CUSTOM_STAGE_NAMES
     assert not overlap, f"generic/custom stage sets must be disjoint, got overlap: {overlap}"
+
+
+def test_ai_job_renderer_drops_generic_needs():
+    """Regression: AI-generated jobs that declare `configuration.needs: [sast]`
+    must NOT emit `needs: [sast]` in the custom file. The custom file is a
+    `workflow_call` reusable workflow that has no `sast` sibling, so emitting
+    that reference makes GitHub reject the file with
+      "Job 'X' depends on unknown job 'sast'" or
+      "must contain at least one job with no dependencies".
+    """
+    from app.agents.nodes.workflow_generator import _build_ai_job_from_design
+
+    design = {
+        "name": "blog-markdown-sanitize",
+        "coverage": "cms_security",
+        "reasoning": "test design",
+        "actions": [
+            {
+                "type": "shell_check",
+                "name": "noop",
+                "script": "echo ok",
+            },
+            {
+                "type": "sarif_upload",
+                "category": "blog-markdown-xss",
+            },
+        ],
+        "configuration": {
+            "continue_on_error": True,
+            "timeout_minutes": 10,
+            "needs": ["sast"],  # the old default — must be dropped
+        },
+    }
+    body, reason = _build_ai_job_from_design(design, state=None)
+    assert body, "expected non-empty body"
+    assert "needs:" not in body, (
+        f"AI-generated job must not emit `needs:` in custom file, got:\n{body}"
+    )
+
+
+def test_domain_template_designs_count_per_domain():
+    """Each of the 3 supported domains must contribute at least 6 job
+    designs (3 originals + 3 extended) so the custom file is non-trivial
+    and meaningfully covers domain threats."""
+    from app.agents.nodes.job_reasoning_node import _domain_template_designs
+
+    for domain in ("e-commerce", "blog", "iot"):
+        designs = _domain_template_designs(domain)
+        assert len(designs) >= 6, (
+            f"domain '{domain}' must have >=6 template designs, got {len(designs)}: "
+            f"{[d['name'] for d in designs]}"
+        )
+        # No duplicate job names within a domain
+        names = [d["name"] for d in designs]
+        assert len(names) == len(set(names)), f"duplicate names in {domain}: {names}"

@@ -428,6 +428,15 @@ def extract_findings_from_scanner_outputs(
     return result
 
 
+# Maximum wall-clock seconds for fetching ALL scanner artifacts.
+# Each individual download_artifact already has a 60s httpx timeout,
+# but if multiple artifacts are missing (the workflow didn't upload
+# that scanner's output) each 404 response is fast — the budget only
+# guards against a genuinely hung API connection that could block
+# the entire uvicorn worker for minutes.
+_MAX_SCANNER_FETCH_BUDGET_S = 30.0
+
+
 def fetch_scanner_outputs(
     repository_id: str,
     run_id: int,
@@ -442,19 +451,12 @@ def fetch_scanner_outputs(
     is missing, the scanner is skipped — the log heuristic will
     be the fallback.
 
-    Args:
-        repository_id: GitHub "owner/repo" identifier.
-        run_id: GitHub Actions run id.
-        github_token: optional token for private repos.
-        job_outputs: optional mapping of job_name -> the scanner it
-            produces output for (used as a hint for the artifact
-            API when filenames alone are not enough).
+    A wall-clock budget of 30 s caps the total time spent in this
+    function. If the budget is exhausted, the function returns
+    whatever has been fetched so far so the analysis can continue
+    with log-heuristic findings as fallback.
     """
     out: dict[str, str] = {}
-    # The artifact download API requires the artifact id, not the
-    # filename, so we first list artifacts for the run, then map
-    # by filename. This is the same pattern the Go backend uses
-    # for SARIF uploads.
     from app.services.github_service import (
         get_workflow_run_artifacts,
         download_artifact,
@@ -464,12 +466,19 @@ def fetch_scanner_outputs(
     except Exception as e:
         logger.warning("fetch_scanner_outputs: artifact list failed: %s", e)
         return out
+    import time as _t
+    started = _t.monotonic()
     for scanner, filenames in _SCANNER_ARTIFACT_FILE.items():
-        # Take the FIRST matching filename in priority order. The
-        # trivy entry has both fs and image reports — we prefer fs
-        # (the user-facing container is built in container-scan
-        # which already has its own file).
+        if _t.monotonic() - started > _MAX_SCANNER_FETCH_BUDGET_S:
+            logger.warning(
+                "fetch_scanner_outputs: budget exhausted (%.1fs), "
+                "returning %d scanner(s) so far",
+                _MAX_SCANNER_FETCH_BUDGET_S, len(out),
+            )
+            break
         for filename in filenames:
+            if _t.monotonic() - started > _MAX_SCANNER_FETCH_BUDGET_S:
+                break
             match = next(
                 (a for a in artifacts if isinstance(a, dict) and a.get("name") == filename),
                 None,
@@ -482,7 +491,7 @@ def fetch_scanner_outputs(
                 )
                 if content:
                     out[scanner] = content
-                    break  # stop after first match for this scanner
+                    break
             except Exception as e:
                 logger.warning(
                     "fetch_scanner_outputs: download %s failed: %s",

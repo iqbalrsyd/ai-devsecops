@@ -58,7 +58,7 @@ Total: 18 node compiled | 9 LLM calls
 | `repository_connection` | Koneksi ke GitHub API, validasi token + scope |
 | `repository_scan` | Scan file tree + struktur direktori |
 | `technology_detection` | Deteksi bahasa, framework, build tools, package manager |
-| `architecture_detection` | Klasifikasi **monolith** vs **microservices** vs modular monolith |
+| `architecture_detection` | Klasifikasi **monolitik** (single arsitektur per R2.1) |
 | `deployment_detection` | Dockerfile, K8s manifests, Terraform, Helm |
 | `domain_detection` | Klasifikasi domain webapp (e-commerce, healthcare, fintech, blog, IoT, education) + payment processor (midtrans, xendit, stripe, dll) |
 
@@ -161,7 +161,7 @@ Total: 18 node compiled | 9 LLM calls
 > **Acuan:** `struktur-v7.md` §5.1
 
 - **40 repositori publik open-source** dari GitHub
-  - **20 monolith** + **20 microservices**
+  - **15–18 repositori monolitik** (3 domain × 5–6 repo)
 - **7 domain:**
   - e-commerce, healthcare, fintech, blog/content, IoT, education, general
 - **Ground truth:** label manual berdasarkan README, struktur direktori, dokumentasi repo
@@ -177,13 +177,13 @@ Total: 18 node compiled | 9 LLM calls
 | Pertanyaan | Metrik |
 |------------|--------|
 | Seberapa akurat deteksi teknologi? | Precision, Recall, F1 |
-| Seberapa akurat klasifikasi arsitektur? | Confusion matrix (monolith vs microservices vs modular_monolith) |
+| Seberapa akurat klasifikasi arsitektur? | Akurasi deteksi monolitik (sanity check) |
 | Seberapa akurat deteksi domain? | Precision, Recall, F1 per domain |
 | Seberapa akurat deteksi payment processor? | Akurasi sub-type detection |
 | Apakah workflow syntax valid? | % lolos `actionlint` tanpa error |
 | Apakah actions menggunakan SHA pin? | % SHA pinning compliance |
 | Apakah permissions scope minimal? | % job dengan permissions minimal |
-| Apakah pipeline adaptif terhadap arsitektur? | Perbedaan struktur job monolith vs microservices |
+| Apakah pipeline adaptif terhadap arsitektur? | N/A — arsitektur bukan variabel eksperimen (R2.1) |
 | Apakah kontrol sesuai domain? | Domain relevance score |
 
 ---

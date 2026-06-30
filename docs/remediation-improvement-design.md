@@ -552,7 +552,7 @@ if 'concurrency:' not in yaml_str:
 
 ### Before (Current)
 ```
-Detect: architecture=microservices, docker=True, k8s=True, tf=True
+Detect: architecture=microservices, docker=True, k8s=True, tf=True (legacy, R2.1 monolitik only)
 Generate: inject semua deployment jobs (k8s-scan, kube-bench, terraform-scan, container-build, container-scan)
 Run: 4 jobs fail karena direktori/file tidak ada atau tool tidak bisa jalan
 
@@ -567,7 +567,7 @@ Run fails → 4 jobs fail → generateFindingsFromJobs()
 
 ### After (Improved)
 ```
-Detect: architecture=microservices, docker=True, k8s=True, tf=True
+Detect: architecture=microservices, docker=True, k8s=True, tf=True (legacy, R2.1 monolitik only)
 Generate: inject semua deployment jobs DENGAN precondition checks
 Run: semua deployment jobs skip karena direktori tidak ada (exit 0)
 

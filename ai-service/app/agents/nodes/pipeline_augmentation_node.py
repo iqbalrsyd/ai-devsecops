@@ -68,13 +68,13 @@ PIPELINE_AUGMENTATION_PROMPT = """You are an Adaptive DevSecOps Pipeline Compose
 Given applicable security coverages, determine which controls/jobs to
 add to the pipeline and their configuration.
 
-## SCOPE (skripsi Bab 3, revisi 3-domain & 2-architecture)
+## SCOPE (skripsi Bab 3, revisi 3-domain & 1-architecture)
 
 Supported domains: e-commerce, blog, iot (+ general fallback).
-Supported architectures: monolithic, modular_monolith.
+Supported architectures: monolithic (saja).
 Do NOT invent augmentations for unsupported domains (healthcare /
 fintech / education / microservices). Stay within the supported
-3-domain scope.
+3-domain scope. Arsitektur bukan variabel eksperimen (batasan B7).
 
 ## Repository Context
 
@@ -97,7 +97,6 @@ Detected Domain: {domain}
 - iac_scan (trivy config + checkov)
 - compliance_check (legacy, only when a relevant coverage is applicable)
 - docker_compose_validate
-- dependency_scan_per_service (matrix strategy for modular_monolith)
 
 ## Task
 
@@ -325,14 +324,15 @@ def pipeline_augmentation_node(state: PipelineEngineerState) -> PipelineEngineer
             })
 
     # Pipeline stages (ordered)
+    # Arsitektur bukan variabel eksperimen (batasan B7). Semua arsitektur
+    # diperlakukan sebagai monolitik tradisional. docker_compose_validate
+    # hanya ditambahkan jika ada evidence deployment docker-compose.
     pipeline_stages: list[str] = ["lint"]
-    if arch_type == "modular_monolith":
+    if any(d in str(deployment).lower() for d in ["docker-compose", "docker_compose", "compose"]):
         pipeline_stages.append("docker_compose_validate")
     pipeline_stages.extend(["test", "sast", "sca", "secret_scan"])
     if any(c.get("id") in {"container_security", "dependency_security"} for c in applicable):
         pipeline_stages.append("container_scan")
-    if arch_type == "modular_monolith":
-        pipeline_stages.append("dependency_scan_per_service")
     if any(c.get("id") == "container_security" for c in applicable):
         pipeline_stages.append("container_build")
 

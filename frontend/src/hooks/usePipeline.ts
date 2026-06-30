@@ -693,6 +693,57 @@ export function useRepoPipeline() {
   })
 }
 
+/**
+ * Bab 5.13.5: Go-side fallback for the Tahap-1 / Tahap-2
+ * detection. The Go backend stores the result of the last
+ * repository analysis on the `repository_insights` table; this
+ * hook returns it in the same shape as `useRepoPipeline` so the
+ * PDF cover page has data even when the AI service is slow or
+ * unreachable.
+ *
+ * The endpoint is on the Go side (not the AI service), so the
+ * `repoId` path param is the Go-side UUID (passed in the URL
+ * from the FE), not the `owner/repo` slug.
+ */
+export function useRepoPipelineSummary(repoId: string | undefined) {
+  return useQuery<Partial<RepoPipelineResult> & { has_insight?: boolean; _source?: string; _error?: string }>({
+    queryKey: ["repo-pipeline-summary", repoId],
+    queryFn: async () => {
+      if (!repoId) return { has_insight: false }
+      try {
+        const res = await api.get(`/repositories/${repoId}/pipeline-summary`)
+        return res.data
+      } catch (e) {
+        // v9.5: log the *full* error (status + message) so the
+        // reviewer can tell whether the failure is 401 (token),
+        // 404 (no insight), or 500 (BE crash). Previously the
+        // log was just "[useRepoPipelineSummary] failed" which
+        // made root-causing "PDF generation failed because
+        // fetching failed to get pipeline_id / run_id" impossible.
+        const err = e as {
+          response?: { status?: number; data?: unknown }
+          message?: string
+        }
+        const status = err?.response?.status
+        const message = err?.message || "unknown error"
+        console.warn(
+          `[useRepoPipelineSummary] failed (status=${status}, repoId=${repoId}):`,
+          message,
+          err?.response?.data,
+        )
+        return {
+          has_insight: false,
+          _error: status ? `HTTP ${status}: ${message}` : message,
+        }
+      }
+    },
+    enabled: !!repoId,
+    staleTime: 5 * 60 * 1000,
+    retry: 1,  // v9.5: retry once on transient errors (was retry: false)
+    retryDelay: 2000,
+  })
+}
+
 export interface PerVulnRecommendationResult {
   rule_id: string
   file_location: string | null

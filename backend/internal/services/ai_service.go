@@ -17,7 +17,7 @@ type AIService struct {
 func NewAIService(baseURL string) *AIService {
 	return &AIService{
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		client:  &http.Client{Timeout: 600 * time.Second},
 	}
 }
 

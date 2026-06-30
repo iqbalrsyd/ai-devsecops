@@ -96,7 +96,7 @@ NODES_T1: list[dict] = [
         "name": "Architecture Detection",
         "tahap": 1,
         "type": "llm",
-        "function": "LLM classifies architecture: monolithic, modular_monolith (FE/BE split). (v9.3 revisi 3-domain & 2-arch).",
+        "function": "LLM classifies architecture: monolithic (only). (v9.5 revisi 3-domain & 1-arch per R2.1).",
         "inputs": ["repository_structure", "detected_technologies"],
         "outputs": [
             "detected_architecture",
@@ -106,13 +106,14 @@ NODES_T1: list[dict] = [
         ],
         "prompt": (
             "You are a DevSecOps engineer analyzing application architecture. "
-            "Determine architecture_type (monolithic | modular_monolith) with "
-            "confidence 0.0-1.0 and explain. Only these two values are supported."
+            "Determine architecture_type (monolithic only) with confidence "
+            "0.0-1.0 and explain. Always return 'monolithic' per R2.1."
         ),
         "fallback": (
             "If LLM JSON parse fails, default to 'monolithic'. "
-            "_resolve_arch_type() can upgrade based on file evidence (FE/BE "
-            "split, docker-compose + service manifests = modular_monolith)."
+            "Arsitektur bukan variabel eksperimen — _resolve_arch_type() "
+            "selalu mengembalikan 'monolithic' (tidak ada upgrade ke "
+            "modular_monolith)."
         ),
         "file": "app/agents/nodes/architecture_detection_node.py",
         "line_count": 87,

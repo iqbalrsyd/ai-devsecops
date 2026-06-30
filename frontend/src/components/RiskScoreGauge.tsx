@@ -197,6 +197,25 @@ export default function RiskScoreGauge({
   const low = severity_counts?.low ?? 0
   const totalFindings = crit + high + med + low
 
+  // Band chip — a small pill rendered right next to the
+  // headline score that explicitly states the band range so
+  // the user can see at a glance WHY the number is coloured
+  // the way it is (e.g. "≥ 100" → red). When the analysis is
+  // still pending we render a neutral "not analyzed" chip
+  // instead.
+  type BandChip = { label: string; range: string; classes: string } | null
+  const bandChip: BandChip = pending
+    ? { label: "Not analyzed", range: "no data", classes: "bg-gray-100 text-gray-700 border-gray-300" }
+    : effectiveScore === null
+      ? null
+      : effectiveScore > 100
+        ? { label: "CRITICAL", range: "> 100", classes: "bg-red-100 text-red-800 border-red-300" }
+        : effectiveScore > 50
+          ? { label: "HIGH", range: "50 – 100", classes: "bg-orange-100 text-orange-800 border-orange-300" }
+          : effectiveScore > 25
+            ? { label: "MEDIUM", range: "25 – 50", classes: "bg-amber-100 text-amber-800 border-amber-300" }
+            : { label: "LOW", range: "< 25", classes: "bg-green-100 text-green-800 border-green-300" }
+
   return (
     <Card className={`${bg} ${border}`}>
       <CardHeader className="pb-2">
@@ -209,13 +228,25 @@ export default function RiskScoreGauge({
         {/* The score number is the headline — no dial, no arc, no
             0-100 inversion. Higher = more risk. The system
             decides the colour bucket from the CVSS sum. */}
-        <div className="flex items-baseline gap-2">
+        <div className="flex items-baseline gap-2 flex-wrap">
           <span className={`text-5xl font-bold ${color}`}>
             {effectiveScore !== null ? effectiveScore.toFixed(1) : "—"}
           </span>
           {displayLevel && displayLevel !== "Not analyzed" && displayLevel !== "Unknown" && (
             <span className={`text-sm font-semibold uppercase tracking-wide ${color}`}>
               {displayLevel}
+            </span>
+          )}
+          {/* Band chip — makes the threshold range explicit so
+              the user can read WHY the number is red/orange/etc
+              without consulting the helper text below. */}
+          {bandChip && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${bandChip.classes}`}
+              title={`Headline band threshold: ${bandChip.range}`}
+            >
+              <span>{bandChip.label}</span>
+              <span className="font-mono opacity-80">· {bandChip.range}</span>
             </span>
           )}
         </div>
@@ -230,10 +261,13 @@ export default function RiskScoreGauge({
         </p>
         {/* Headline-band threshold reminder. Explains why the
             number above is coloured the way it is, so the
-            user does not have to guess. */}
+            user does not have to guess. The chip above shows
+            the *current* band; this line shows the full
+            legend so the user understands where the other
+            bands live. */}
         {effectiveScore !== null && (
           <p className="text-[10px] text-muted-foreground/80 leading-snug">
-            Headline band: critical ≥ 100, high ≥ 50, medium ≥ 25.
+            Headline band: critical &gt; 100, high 50 – 100, medium 25 – 50, low &lt; 25.
           </p>
         )}
         {pending && onAnalyze ? (

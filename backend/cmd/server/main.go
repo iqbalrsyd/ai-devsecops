@@ -135,6 +135,12 @@ func main() {
 			protected.GET("/repositories/:repoId", repositoryHandler.GetByID)
 			protected.DELETE("/repositories/:repoId", repositoryHandler.Delete)
 			protected.GET("/repositories/:repoId/insights", pipelineHandler.GetInsights)
+			// Bab 5.13.5: Tahap-1/Tahap-2 detection summary served
+			// from the Go-side repository_insights table. Used by
+			// the FE as a fallback when the AI service is slow or
+			// down so the PDF report cover page still has
+			// architecture/technologies/deployment data.
+			protected.GET("/repositories/:repoId/pipeline-summary", pipelineHandler.GetPipelineSummary)
 
 			// === Pipelines (Global History) ===
 			protected.GET("/pipelines", pipelineHandler.ListAll)

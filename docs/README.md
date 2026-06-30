@@ -83,7 +83,7 @@ AI Service LangGraph:
   2. repository_scan (scan repo structure)
   3. vulnerability_scan (scan dependencies)
   4. technology_detection (detect languages/frameworks)
-  5. architecture_detection (detect monolith/microservice)
+  5. architecture_detection (detect monolith — only per R2.1)
   6. deployment_detection (detect Docker/K8s/Terraform)
   7. security_requirement_inference (determine security controls)
   8. workflow_generation (generate GitHub Actions YAML)

@@ -5,7 +5,7 @@ class GeneratePipelineRequest(BaseModel):
     query: str = Field(description="Natural language requirements for the pipeline")
     repository_id: str = Field(description="GitHub repo ID (full name: owner/repo)")
     project_id: str = Field(description="Project UUID in the database")
-    project_type: str = Field(default="monolithic", description="monolithic | modular_monolith (FE/BE split)")
+    project_type: str = Field(default="monolithic", description="monolithic only (per R2.1 — arsitektur bukan variabel eksperimen)")
 
 
 class ValidationResult(BaseModel):
