@@ -10,9 +10,9 @@ import { useProjects } from "@/hooks/useProjects"
 import { useRepositoryDetail } from "@/hooks/useRepositories"
 import Header from "@/components/Header"
 import NodeSpecCard from "@/components/NodeSpecCard"
-import RiskScoreGauge from "@/components/RiskScoreGauge"
+import { renderMarkdown } from "@/components/MarkdownText"
 import type { PipelineJob, JobStep, Finding } from "@/hooks/usePipelinesV2"
-import { Clock, ExternalLink, Loader2, CheckCircle2, XCircle, AlertTriangle, ChevronDown, ChevronRight, FileWarning, Shield, RefreshCw, FileText, Layers, Sparkles } from "lucide-react"
+import { Clock, ExternalLink, Loader2, CheckCircle2, XCircle, AlertTriangle, ChevronDown, ChevronRight, FileWarning, Shield, RefreshCw, FileText, Layers, Sparkles, Bot, Terminal, ArrowRight, Copy } from "lucide-react"
 
 function safeJsonParse<T>(val: unknown, fallback: T): T {
   if (val == null || val === "" || val === "null") return fallback
@@ -674,6 +674,132 @@ function severityToLabel(severity: string | undefined | null): {
   return { label: "NOTE", classes: "bg-blue-100 text-blue-800 border-blue-300" }
 }
 
+// RecommendationPanel renders the AI-generated fix for a
+// single Code Scanning alert. The backend returns
+// `{ recommendation, code_changes[] }`; this component turns
+// that into something that looks like a real AI assistant
+// response (markdown body + side-by-side diff blocks + a
+// copy-to-clipboard action).
+//
+// The backend may occasionally return an empty
+// `recommendation` string when the LLM call failed and the
+// deterministic fallback was empty too — in that case we
+// surface a polite empty state so the user is not staring at
+// a blank card.
+function RecommendationPanel({
+  rec,
+}: {
+  rec: import("@/hooks/usePipeline").PerVulnRecommendationResult
+}) {
+  const [copied, setCopied] = useState(false)
+  const body = (rec.recommendation || "").trim()
+  const changes = Array.isArray(rec.code_changes) ? rec.code_changes : []
+  // Only show the diff section when at least one entry has
+  // actual `before`/`after` content. The BE sometimes
+  // returns a placeholder `code_changes: [{}]` for findings
+  // that have no concrete snippet — render an empty
+  // placeholder block in that case.
+  const usableChanges = changes.filter(
+    (c) => (c.before && c.before.trim()) || (c.after && c.after.trim()),
+  )
+  const handleCopy = async () => {
+    const text = [
+      body,
+      ...changes
+        .map((c, i) => {
+          const header = c.description ? `# Change ${i + 1}: ${c.description}\n` : ""
+          const before = c.before ? `- ${c.before}\n` : ""
+          const after = c.after ? `+ ${c.after}\n` : ""
+          return header + before + after
+        })
+        .filter(Boolean),
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard may be unavailable in some browsers; ignore.
+    }
+  }
+  return (
+    <div className="rounded-md border border-purple-200 bg-gradient-to-br from-purple-50/60 to-white">
+      <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-purple-100">
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-purple-800">
+          <Bot className="h-3.5 w-3.5" />
+          AI-generated fix
+        </div>
+        <button
+          type="button"
+          onClick={() => void handleCopy()}
+          className="inline-flex items-center gap-1 text-[10px] text-gray-500 hover:text-purple-700 transition-colors"
+          title="Copy the recommendation to clipboard"
+        >
+          {copied ? (
+            <CheckCircle2 className="h-3 w-3 text-green-600" />
+          ) : (
+            <Copy className="h-3 w-3" />
+          )}
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <div className="px-3 py-2.5 text-xs">
+        {body ? (
+          <div className="space-y-1.5">{renderMarkdown(body)}</div>
+        ) : (
+          <p className="text-gray-500 italic">
+            The AI did not return a textual recommendation for this
+            finding. Inspect the suggested code change below, or open
+            the rule documentation on GitHub for guidance.
+          </p>
+        )}
+        {usableChanges.length > 0 && (
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center gap-1 text-[10px] font-semibold text-gray-600 uppercase tracking-wide">
+              <Terminal className="h-3 w-3" />
+              Suggested changes ({usableChanges.length})
+            </div>
+            {usableChanges.map((cc, idx) => (
+              <div
+                key={idx}
+                className="rounded-md border border-gray-200 bg-white overflow-hidden"
+              >
+                {cc.description && (
+                  <div className="px-2.5 py-1 text-[11px] text-gray-700 border-b border-gray-100 bg-gray-50">
+                    {cc.description}
+                  </div>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100">
+                  <div className="bg-red-50/40">
+                    <div className="px-2 py-0.5 text-[10px] font-mono text-red-700 border-b border-red-100">
+                      before
+                    </div>
+                    <pre className="text-[11px] text-red-900 px-2 py-1.5 overflow-x-auto font-mono whitespace-pre">
+                      <code>{cc.before || "(no original)"}</code>
+                    </pre>
+                  </div>
+                  <div className="bg-green-50/40">
+                    <div className="px-2 py-0.5 text-[10px] font-mono text-green-700 border-b border-green-100 flex items-center gap-1">
+                      <ArrowRight className="h-2.5 w-2.5" />
+                      after
+                    </div>
+                    <pre className="text-[11px] text-green-900 px-2 py-1.5 overflow-x-auto font-mono whitespace-pre">
+                      <code>{cc.after || "(no replacement)"}</code>
+                    </pre>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function CodeScanningAlertsCard({
   alerts,
   repositoryFullName,
@@ -703,8 +829,16 @@ function CodeScanningAlertsCard({
   ) => {
     const key = `${alert.rule_id ?? ""}::${alert.file_location ?? ""}::${alert.line ?? ""}`
     if (!repositoryFullName || !alert.rule_id) return
-    if (recByKey[key]?.recommendation) return // already fetched
-    setRecByKey((prev) => ({ ...prev, [key]: { loading: true } }))
+    // Don't refetch while a request is already in flight for
+    // this alert. The "Regenerate" button intentionally
+    // bypasses the cache (we *want* the user to be able to
+    // re-run the LLM), so we only short-circuit on `loading`,
+    // not on a previously-fetched `recommendation`.
+    if (recByKey[key]?.loading) return
+    setRecByKey((prev) => ({
+      ...prev,
+      [key]: { ...prev[key], loading: true, error: undefined },
+    }))
     try {
       const result = await recommendMutation.mutateAsync({
         repository_full_name: repositoryFullName,
@@ -780,6 +914,34 @@ function CodeScanningAlertsCard({
             Code Scanning Alerts ({sorted.length})
           </CardTitle>
           <div className="flex items-center gap-2 text-xs">
+            {sorted.length > 0 && totalCvss > 0 && (() => {
+              // Headline band palette mirrors the "Total CVSS
+              // Score" card on the dashboard. Thresholds:
+              //   total > 100 → critical (red)
+              //   total >  50 → high     (orange)
+              //   total >  25 → medium   (amber)
+              //   else         → low      (green)
+              const band =
+                totalCvss > 100 ? "critical"
+                : totalCvss > 50 ? "high"
+                : totalCvss > 25 ? "medium"
+                : "low"
+              const palette: Record<string, string> = {
+                critical: "bg-red-200 text-red-900 border-red-400",
+                high: "bg-red-100 text-red-800 border-red-300",
+                medium: "bg-amber-100 text-amber-800 border-amber-300",
+                low: "bg-green-100 text-green-800 border-green-300",
+              }
+              const label = band.toUpperCase()
+              return (
+                <span
+                  className={`px-2 py-0.5 rounded font-mono font-semibold border ${palette[band]}`}
+                  title={`Total CVSS v3.1 sum across all findings — ${label} band`}
+                >
+                  Total CVSS {fmtSum(totalCvss)} · {label}
+                </span>
+              )
+            })()}
             {cvssByBand.critical.count > 0 && (
               <span className="px-2 py-0.5 rounded bg-red-100 text-red-800 border border-red-300 font-mono">
                 {cvssByBand.critical.count} critical · CVSS {fmtSum(cvssByBand.critical.sum)}
@@ -798,11 +960,6 @@ function CodeScanningAlertsCard({
             {cvssByBand.low.count > 0 && (
               <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-300 font-mono">
                 {cvssByBand.low.count} low · CVSS {fmtSum(cvssByBand.low.sum)}
-              </span>
-            )}
-            {sorted.length > 0 && totalCvss > 0 && (
-              <span className="px-2 py-0.5 rounded bg-gray-900 text-white border border-gray-700 font-mono">
-                Total CVSS {fmtSum(totalCvss)}
               </span>
             )}
           </div>
@@ -999,45 +1156,22 @@ function CodeScanningAlertsCard({
                         <p className="text-red-600 italic">
                           Failed to generate: {rec.error}
                         </p>
-                      ) : rec?.recommendation ? (
-                        <div className="space-y-2">
-                          <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">
-                            {rec.recommendation.recommendation}
-                          </p>
-                          {rec.recommendation.code_changes &&
-                            rec.recommendation.code_changes.length > 0 && (
-                              <div className="space-y-2">
-                                {rec.recommendation.code_changes.map(
-                                  (cc, idx) => (
-                                    <div
-                                      key={idx}
-                                      className="border border-gray-200 rounded p-2 bg-gray-50"
-                                    >
-                                      {cc.description && (
-                                        <div className="text-[11px] text-gray-600 mb-1">
-                                          {cc.description}
-                                        </div>
-                                      )}
-                                      {cc.before && (
-                                        <pre className="text-[10px] bg-red-50 border border-red-200 rounded p-1 overflow-x-auto mb-1">
-                                          <code>- {cc.before}</code>
-                                        </pre>
-                                      )}
-                                      {cc.after && (
-                                        <pre className="text-[10px] bg-green-50 border border-green-200 rounded p-1 overflow-x-auto">
-                                          <code>+ {cc.after}</code>
-                                        </pre>
-                                      )}
-                                    </div>
-                                  ),
-                                )}
-                              </div>
-                            )}
+                      ) : rec?.loading && !rec?.recommendation ? (
+                        <div className="rounded-md border border-purple-200 bg-purple-50/30 px-3 py-3 space-y-2 animate-pulse">
+                          <div className="flex items-center gap-2 text-[11px] font-semibold text-purple-800">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Generating recommendation…
+                          </div>
+                          <div className="h-2 bg-purple-100 rounded w-11/12" />
+                          <div className="h-2 bg-purple-100 rounded w-9/12" />
+                          <div className="h-2 bg-purple-100 rounded w-10/12" />
                         </div>
+                      ) : rec?.recommendation ? (
+                        <RecommendationPanel rec={rec.recommendation} />
                       ) : fixText ? (
-                        <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">
-                          {fixText}
-                        </p>
+                        <div className="text-gray-700 text-xs leading-relaxed border border-gray-200 rounded-md bg-gray-50 px-3 py-2">
+                          {renderMarkdown(fixText)}
+                        </div>
                       ) : (
                         <p className="text-gray-400 italic">
                           No recommendation available yet. Click{" "}
@@ -1999,8 +2133,6 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
           // UI through `liveAnalysis`.
           const findings: Array<{ source_tool?: string; scanner?: string; type?: string; severity?: string; file?: string; file_location?: string; line?: number; code_snippet?: string; explanation?: string; evidence?: string; recommendation?: string; remediation_recommendation?: string; title?: string }> =
             liveAnalysis?.findings ?? savedAnalysis.findings ?? []
-          const severity: Record<string, number> =
-            liveAnalysis?.severity_breakdown ?? savedAnalysis.severity_breakdown ?? {}
           const recommendations: Finding[] = savedAnalysis.recommendations ?? []
           const nodeIoRecords: NodeIORecord[] =
             (liveAnalysis?.node_io && liveAnalysis.node_io.length > 0
@@ -2014,160 +2146,21 @@ function RunDetailContent({ projectId, repoId, runId, version }: { projectId: st
             low: "bg-blue-100 text-blue-800 border-blue-300",
           }
 
-          type SeverityKey = "critical" | "high" | "medium" | "low"
-
-          // Bab 5.13.3: severity is bucketed by the CVSS base score,
-          // not by the raw GitHub "warning|error|note" string. This
-          // makes the breakdown match the industry-standard CVSS v3.1
-          // bands (critical >= 9.0, high >= 7.0, medium >= 4.0, low < 4.0)
-          // regardless of which scanner produced the finding.
-          const cvssBands: Record<SeverityKey, { count: number; sum: number }> = {
-            critical: { count: 0, sum: 0 },
-            high: { count: 0, sum: 0 },
-            medium: { count: 0, sum: 0 },
-            low: { count: 0, sum: 0 },
-          }
+          // Headline CVSS sum across the findings. Used by the
+          // "Total CVSS" badge in the Code Scanning Alerts card
+          // header — the value is rendered with a colour band
+          // (critical / high / medium / low) so the user can see
+          // the headline risk at a glance without a dedicated
+          // summary card.
           let totalCvss = 0
-          // Bucket anchors: representative CVSS score used when a
-          // finding carries a severity band but no numeric score
-          // (e.g. log-derived npm audit output). Keeps the
-          // Severity Breakdown card in sync with the Security
-          // Findings list even when the deterministic CVSS lookup
-          // has not run yet for a particular rule.
-          const bandAnchor: Record<SeverityKey, number> = {
-            critical: 9.5,
-            high: 7.5,
-            medium: 5.0,
-            low: 2.0,
-          }
-          for (const f of findings as Array<{ cvss_score?: number; cvss_severity?: string; severity?: string }>) {
-            const rawScore = typeof f.cvss_score === "number" ? f.cvss_score : null
-            const sevStr = (f.cvss_severity || f.severity || "").toLowerCase()
-            // Prefer cvss_severity (already banded by the 3-tier
-            // CVSS lookup); fall back to deriving the band from
-            // the raw CVSS score for findings that only carry a
-            // score; fall back to the severity string for log
-            // findings that have neither.
-            const band = (f.cvss_severity || "").toLowerCase() as SeverityKey
-            const derivedBand: SeverityKey =
-              band in cvssBands
-                ? band
-                : rawScore != null
-                  ? rawScore >= 9.0
-                    ? "critical"
-                    : rawScore >= 7.0
-                      ? "high"
-                      : rawScore >= 4.0
-                        ? "medium"
-                        : "low"
-                  : sevStr.includes("critical") || sevStr === "error"
-                    ? "critical"
-                    : sevStr.includes("high") || sevStr === "warning"
-                      ? "high"
-                      : sevStr.includes("medium") || sevStr === "note"
-                        ? "medium"
-                        : sevStr.includes("low") || sevStr === "info"
-                          ? "low"
-                          : "medium"
-            cvssBands[derivedBand].count += 1
-            // Only add to the CVSS sum when we have a real numeric
-            // score. Findings without a `cvss_score` still count
-            // in the per-bucket breakdown (so the bucket chips
-            // stay accurate) but they don't inflate the headline
-            // total. Without this guard, a refresh that produced
-            // no CVSS data would show "Total CVSS 100.0" because
-            // the band-anchor fallback (9.5 × N critical, etc.)
-            // got summed up.
-            if (rawScore != null) {
-              cvssBands[derivedBand].sum += rawScore
-              totalCvss += rawScore
+          for (const f of findings as Array<{ cvss_score?: number }>) {
+            if (typeof f.cvss_score === "number") {
+              totalCvss += f.cvss_score
             }
-          }
-          const cvssBandLabel: Record<SeverityKey, string> = {
-            critical: "Critical",
-            high: "High",
-            medium: "Medium",
-            low: "Low",
-          }
-          const cvssBandColors: Record<SeverityKey, { bg: string; text: string; border: string }> = {
-            critical: { bg: "bg-red-100", text: "text-red-800", border: "border-red-300" },
-            high: { bg: "bg-orange-100", text: "text-orange-800", border: "border-orange-300" },
-            medium: { bg: "bg-yellow-100", text: "text-yellow-800", border: "border-yellow-300" },
-            low: { bg: "bg-blue-100", text: "text-blue-800", border: "border-blue-300" },
           }
 
           return (
             <>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Total CVSS Score (left). Uses the shared
-                    RiskScoreGauge so the colour logic, band chip,
-                    and headline threshold legend live in one place.
-                    `cvss_sum` falls back to the per-bucket CVSS sum
-                    when the server-side score has not been computed
-                    yet. `severity_counts` feeds the subtitle ("X
-                    findings"). The "Run Analysis" button is wired
-                    to the existing refresh handler so the user can
-                    trigger a re-analysis from the card itself. */}
-                <RiskScoreGauge
-                  score={
-                    typeof savedAnalysis.risk_score === "number"
-                      ? savedAnalysis.risk_score
-                      : totalCvss > 0
-                        ? totalCvss
-                        : null
-                  }
-                  level={savedAnalysis.risk_level ?? null}
-                  cvss_sum={totalCvss > 0 ? totalCvss : null}
-                  severity_counts={{
-                    critical: cvssBands.critical.count,
-                    high: cvssBands.high.count,
-                    medium: cvssBands.medium.count,
-                    low: cvssBands.low.count,
-                  }}
-                  onAnalyze={() => void handleRefreshAnalysis()}
-                  analyzing={analyzeMutation.isPending}
-                />
-
-                {/* CVSS Sum by Severity (right). Per-bucket CVSS
-                    sum + count. The bucket counts are derived
-                    from cvss_severity (preferred) or the raw CVSS
-                    score (fallback), so the same alert can be
-                    counted differently from its GitHub Code
-                    Scanning severity string. */}
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-sm font-medium">
-                      CVSS Sum by Severity
-                    </CardTitle>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Buckets derived from the CVSS v3.1 base score (critical
-                      &ge; 9.0, high &ge; 7.0, medium &ge; 4.0, low &lt; 4.0).
-                      Not the GitHub Code Scanning severity string.
-                    </p>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="grid grid-cols-2 gap-3">
-                      {(["critical", "high", "medium", "low"] as SeverityKey[]).map((b) => (
-                        <div
-                          key={b}
-                          className={`rounded-md border ${cvssBandColors[b].border} ${cvssBandColors[b].bg} px-3 py-3`}
-                        >
-                          <div className={`text-[10px] font-bold uppercase ${cvssBandColors[b].text}`}>
-                            {cvssBandLabel[b]}
-                          </div>
-                          <div className={`text-2xl font-bold ${cvssBandColors[b].text}`}>
-                            {cvssBands[b].count}
-                          </div>
-                          <div className={`text-[10px] ${cvssBandColors[b].text} font-mono opacity-75`}>
-                            CVSS Σ {cvssBands[b].sum.toFixed(1)}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-
               {savedAnalysis.ai_explanation && (
                 <Card>
                   <CardHeader>
