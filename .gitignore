@@ -49,3 +49,18 @@ yarn-error.log*
 
 # Backup zip files
 *.zip.bak
+
+# Production secrets
+.env
+.env.production
+.env.production.local
+nginx/certs/
+nginx/letsencrypt/
+*.pem
+*.key
+
+# Backup files
+/opt/backups/
+
+# Logs
+/var/log/

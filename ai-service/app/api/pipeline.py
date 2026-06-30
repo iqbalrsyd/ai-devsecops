@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import time
 
 from fastapi import APIRouter, HTTPException, Request
@@ -1277,6 +1278,8 @@ def _known_code_rule_fix(
             "match": [
                 "hardcoded-secret", "hardcoded-credential", "hardcoded-password",
                 "hardcoded-api-key", "hardcoded-token",
+                "generic-api-key", "generic-secret", "generic-password",
+                "gitleaks", "trufflehog", "git-secrets",
             ],
             "summary": (
                 "A secret, API key, password, or token is committed to "
@@ -1513,6 +1516,116 @@ def _detect_language(
         return "javascript"
 
     return ""
+
+
+def _parse_trivy_alert(vuln: dict) -> dict:
+    """Extract Trivy-specific fields from a Code Scanning alert.
+
+    Trivy's SARIF uploader writes a structured ``message.text`` for
+    every finding, e.g.::
+
+        Package: PyJWT
+        Installed Version: 1.7.1
+        Vulnerability CVE-2026-48522
+        Severity: MEDIUM
+        Fixed Version: 2.13.0
+        Link: CVE-2026-48522
+
+        PyJWT: Server-Side Request Forgery (SSRF) via uncontrolled
+        URL fetching in PyJWKClient
+
+    The current normalizer stashes this whole blob in
+    ``evidence``/``explanation`` but the per-vuln ``/recommend``
+    endpoint never had access to it, so recommendations for Trivy
+    findings fell back to the generic GitHub-advisory pointer.
+
+    This helper scans the alert fields for those Trivy lines and
+    returns a small dict with ``package_name``, ``installed_version``,
+    ``fixed_version``, ``vulnerability_id``, ``cve``, ``ecosystem``,
+    and the full Trivy description. Empty fields stay as ``""`` so
+    the caller can detect "not a Trivy alert" and skip the
+    special branch.
+    """
+    blob = "\n".join(
+        str(vuln.get(k) or "")
+        for k in (
+            "evidence",
+            "explanation",
+            "message",
+            "description",
+            "title",
+        )
+    )
+
+    out: dict = {
+        "package_name": "",
+        "installed_version": "",
+        "fixed_version": "",
+        "vulnerability_id": "",
+        "cve": "",
+        "description": "",
+        "ecosystem": "",
+        "is_trivy": False,
+    }
+
+    if not blob.strip():
+        return out
+
+    pkg = re.search(r"(?im)^Package:\s*(\S+)", blob)
+    if pkg:
+        out["package_name"] = pkg.group(1).strip()
+        out["is_trivy"] = True
+
+    installed = re.search(r"(?im)^Installed Version:\s*(\S+)", blob)
+    if installed:
+        out["installed_version"] = installed.group(1).strip()
+        out["is_trivy"] = True
+
+    fixed = re.search(r"(?im)^Fixed Version:\s*(\S+)", blob)
+    if fixed:
+        out["fixed_version"] = fixed.group(1).strip()
+        out["is_trivy"] = True
+
+    cve = re.search(r"\b(CVE-\d{4}-\d{4,7})\b", blob)
+    if cve:
+        out["cve"] = cve.group(1)
+        out["vulnerability_id"] = cve.group(1)
+        out["is_trivy"] = True
+
+    if out["is_trivy"]:
+        # The Trivy title is often in `rule.name`
+        # ("<pkg>: <description>"); capture the LONGEST
+        # "<Word>: <text>" line we can find — the package
+        # name alone (e.g. "PyJWT:") gives an empty body
+        # which we want to skip. The interesting line is the
+        # one where the colon is followed by 20+ characters
+        # of description.
+        candidates = re.findall(
+            r"(?m)^[A-Za-z][A-Za-z0-9_.-]+:\s+(\S.{20,})$", blob
+        )
+        if candidates:
+            # Take the longest candidate — usually the
+            # vulnerability title is more descriptive than
+            # the boilerplate header.
+            out["description"] = max(candidates, key=len).strip()
+
+    # Detect the package manager from the file path the alert
+    # was raised in. Trivy records the lockfile in
+    # `file_location`; requirements.txt is Python, package-lock.json
+    # is JS, go.sum is Go, etc.
+    file_loc = (vuln.get("file_location") or "").lower()
+    if any(x in file_loc for x in ("requirements.txt", "pipfile", "poetry.lock", "pyproject.toml", ".py")):
+        out["ecosystem"] = "python"
+    elif any(x in file_loc for x in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml", ".js", ".ts")):
+        out["ecosystem"] = "javascript"
+    elif any(x in file_loc for x in ("go.sum", "go.mod", ".go")):
+        out["ecosystem"] = "go"
+    elif any(x in file_loc for x in ("gemfile.lock", "gemspec", ".rb")):
+        out["ecosystem"] = "ruby"
+    elif any(x in file_loc for x in ("cargo.lock", "cargo.toml", ".rs")):
+        out["ecosystem"] = "rust"
+
+    return out
 
 
 def _known_rule_fix(
@@ -1968,6 +2081,122 @@ def _known_rule_fix(
     return found
 
 
+# Per-ecosystem upgrade-command templates for Trivy findings.
+# Trivy SARIF uploader doesn't tell us which package manager
+# the user actually uses (just the lockfile in `file_location`),
+# so we emit the most common upgrade command for each
+# ecosystem. The user can adjust the syntax for their tool
+# of choice (uv, poetry, pnpm, yarn, ...).
+_TRIVY_UPGRADE_CMDS: dict[str, str] = {
+    "python": "pip install --upgrade {pkg}>={fixed}",
+    "javascript": "npm install {pkg}@{fixed}",
+    "go": "go get {pkg}@{fixed}",
+    "ruby": "bundle update {pkg}",
+    "rust": "cargo update -p {pkg}",
+}
+
+
+def _build_trivy_recommendation(
+    trivy: dict,
+    vuln: dict,
+) -> dict:
+    """Render a Trivy-specific recommendation without calling the LLM.
+
+    Trivy's SARIF uploader writes a structured message that
+    already contains everything we need to give the user a
+    concrete, actionable fix: the package name, the installed
+    version, the CVE id, and the fixed version. The LLM call
+    is best-effort and frequently returns empty for dependency
+    findings (it tends to repeat the rule name and call it
+    "the vulnerability"), so we short-circuit here and return
+    a deterministic, info-rich response.
+
+    The shape matches the response of
+    ``generate_per_vuln_recommendation`` (rule_id,
+    file_location, line, recommendation, code_changes) so the
+    FE renders it via the same ``RecommendationPanel`` without
+    any FE changes.
+    """
+    pkg = trivy.get("package_name") or "<package>"
+    installed = trivy.get("installed_version") or "?"
+    fixed = trivy.get("fixed_version") or "?"
+    cve = trivy.get("cve") or trivy.get("vulnerability_id") or "the listed advisory"
+    description = trivy.get("description") or ""
+    ecosystem = trivy.get("ecosystem") or ""
+
+    # Pick the upgrade command template for this ecosystem.
+    cmd_template = _TRIVY_UPGRADE_CMDS.get(ecosystem, "update {pkg} to {fixed}")
+    upgrade_cmd = cmd_template.format(pkg=pkg, fixed=fixed)
+    if ecosystem == "python" and fixed == "?":
+        upgrade_cmd = f"pip install --upgrade {pkg}"
+    if ecosystem == "javascript" and fixed == "?":
+        upgrade_cmd = f"npm install {pkg}@latest"
+    if ecosystem == "go" and fixed == "?":
+        upgrade_cmd = f"go get -u {pkg}"
+
+    # Build a markdown recommendation. The structure mirrors
+    # the deterministic-fallback format used by
+    # _known_rule_fix so the FE renders it consistently.
+    description_line = (
+        f" {description}" if description and description != pkg else ""
+    )
+    description_clause = description_line or " closes the vulnerability path flagged by Trivy"
+    recommendation = (
+        f"**Summary.** `{pkg}` `{installed}` is affected by "
+        f"{cve}{description_line}. The fix is to upgrade to "
+        f"`{pkg}` `{fixed}` (or later)."
+    )
+
+    if ecosystem:
+        recommendation += (
+            f"\n\n**Affected package.** `{pkg}` "
+            f"(installed `{installed}` → fixed `{fixed}`)\n\n"
+            f"**Upgrade command.**\n"
+            f"```bash\n{upgrade_cmd}\n```\n\n"
+        )
+    else:
+        recommendation += (
+            f"\n\n**Affected package.** `{pkg}` "
+            f"(installed `{installed}` → fixed `{fixed}`)\n\n"
+            f"**Upgrade command.** Adjust for your package manager:\n"
+            f"```bash\n{upgrade_cmd}\n```\n\n"
+        )
+
+    recommendation += (
+        f"**Why this works.** {cve} is fixed in `{pkg}` "
+        f"`{fixed}`. The patched release{description_clause}. "
+        f"After upgrading, re-run Trivy to confirm the finding is gone."
+    )
+
+    # Build the code_change hint. The Trivy finding itself
+    # usually doesn't carry a code snippet (the issue is in a
+    # lockfile, not source), so we surface a single "bump
+    # dependency" change that the FE can render as the diff.
+    file_loc = vuln.get("file_location") or ""
+    code_changes: list[dict] = []
+    if file_loc:
+        code_changes.append({
+            "description": (
+                f"Bump `{pkg}` to the safe version `{fixed}` in the manifest."
+            ),
+            "file": file_loc,
+            "before": f"{pkg}=={installed}" if ecosystem == "python"
+                else f"\"{pkg}\": \"^{installed}\"" if ecosystem in ("javascript",)
+                else f"{pkg} {installed}",
+            "after": f"{pkg}=={fixed}" if ecosystem == "python"
+                else f"\"{pkg}\": \"^{fixed}\"" if ecosystem in ("javascript",)
+                else f"{pkg} {fixed}",
+        })
+
+    return {
+        "rule_id": vuln.get("rule_id"),
+        "file_location": vuln.get("file_location"),
+        "line": vuln.get("line"),
+        "recommendation": recommendation,
+        "code_changes": code_changes,
+    }
+
+
 @router.post("/recommend")
 def generate_per_vuln_recommendation(request: dict):
     """Generate a per-vulnerability fix recommendation via the LLM.
@@ -2033,6 +2262,21 @@ def generate_per_vuln_recommendation(request: dict):
         vuln.get("file_location") or "",
         vuln.get("code_snippet") or "",
     )
+
+    # 0. Trivy-aware deterministic branch. Code Scanning alerts
+    # uploaded by Trivy's SARIF action carry a structured
+    # `message.text` with the package name, installed version,
+    # CVE id, and fixed version. The previous behaviour
+    # discarded all of that and fell through to the generic
+    # GitHub-advisory pointer, which gave the user "Open the
+    # Code Scanning tab..." for every Trivy finding — useless
+    # when the user is staring at the dashboard with no other
+    # context. Build a rich, Trivy-specific recommendation
+    # here so the user sees the package name, the version
+    # jump, and the exact upgrade command inline.
+    trivy = _parse_trivy_alert(vuln)
+    if trivy.get("is_trivy"):
+        return _build_trivy_recommendation(trivy, vuln)
 
     # 1. Try the LLM for a context-aware recommendation.
     recommendation = ""
@@ -2103,6 +2347,21 @@ def generate_per_vuln_recommendation(request: dict):
             "queries, validate path traversal, etc.). Set `upgrade_command` "
             "to an empty string. Use the file path, line number, and code "
             "snippet to write a fix that is specific to the flagged code.\n"
+            "  * **Secret-leak / hardcoded-credential rule** (e.g. "
+            "generic-api-key, generic-secret, hardcoded-secret, "
+            "gitleaks, trufflehog, git-secrets, or any rule whose title "
+            "contains 'api key', 'secret', 'token', 'password', 'private "
+            "key', 'aws access key', 'stripe', 'github token'): treat the "
+            "leaked value as **already compromised**. Step 1 must be to "
+            "rotate / revoke the credential at the provider, step 2 is to "
+            "move it to an environment variable or secret manager "
+            "(GitHub Actions secrets, AWS Secrets Manager, HashiCorp "
+            "Vault, Doppler), step 3 is to purge it from git history with "
+            "`git filter-repo` or BFG and force-push, and step 4 is to "
+            "audit downstream clones / forks. Give a `code_changes` "
+            "entry that shows the hardcoded literal being replaced with "
+            "`os.environ[...]` / `process.env.X` / `os.Getenv(...)`. "
+            "Set `upgrade_command` to an empty string.\n"
             "  * If the rule does not clearly match either bucket, treat it "
             "as code-level and give a code-level fix based on the rule id "
             "semantics.\n"
@@ -2238,21 +2497,73 @@ def generate_per_vuln_recommendation(request: dict):
                         "description": c.get("description", ""),
                     })
             else:
-                recommendation = (
-                    f"**Summary.** This finding comes from the `{vuln.get('rule_id')}` "
-                    f"rule. The Code Scanning tab in GitHub has the full advisory "
-                    f"(CVE / GHSA id, affected version range, and patch version).\n\n"
-                    f"**Next steps.**\n"
-                    f"1. Open the GitHub Code Scanning alert (link in the panel above) "
-                    f"and note the CVE / GHSA id and the safe version.\n"
-                    f"2. If the rule is a dependency vulnerability, run the upgrade "
-                    f"command from the advisory (e.g. `npm install <pkg>@<safe-version>` "
-                    f"or `pip install <pkg>==<safe-version>`).\n"
-                    f"3. If the rule is a code-level issue, edit "
-                    f"`{vuln.get('file_location') or 'the flagged file'}` and apply the "
-                    f"fix described in the advisory.\n"
-                    f"4. Re-run the analysis to confirm the finding is gone."
+                _rid = (vuln.get("rule_id") or "").lower()
+                _is_secret_rule = any(
+                    tok in _rid
+                    for tok in (
+                        "secret", "api-key", "apikey", "password", "token",
+                        "credential", "private-key", "gitleaks", "trufflehog",
+                    )
                 )
+                if _is_secret_rule:
+                    _file = vuln.get("file_location") or "the flagged file"
+                    _line = vuln.get("line")
+                    _loc = f"{_file}:{_line}" if _line else _file
+                    recommendation = (
+                        f"**Summary.** `{vuln.get('rule_id')}` detected a hardcoded "
+                        f"credential in `{_loc}`. Treat the value as **already "
+                        f"compromised** — anyone with read access to the repository "
+                        f"(including forks, history, and backups) can use it.\n\n"
+                        f"**Next steps.**\n"
+                        f"1. **Rotate / revoke** the credential at the provider "
+                        f"right now (regenerate the API key, invalidate the "
+                        f"token, reset the password). Do this before editing code.\n"
+                        f"2. **Move the value out of the repo.** Read it at runtime "
+                        f"from an environment variable or a secret manager "
+                        f"(GitHub Actions secrets, AWS Secrets Manager, HashiCorp "
+                        f"Vault, Doppler). See the `code_changes` panel for a "
+                        f"copy-pasteable patch.\n"
+                        f"3. **Purge it from git history** with `git filter-repo` "
+                        f"or BFG Repo-Cleaner, force-push, then audit downstream "
+                        f"clones and forks (GitHub shows them under *Security → "
+                        f"Code scanning → 'Detected in fork'*).\n"
+                        f"4. **Re-run the analysis** to confirm the secret is no "
+                        f"longer detected."
+                    )
+                    code_changes = [
+                        {
+                            "description": (
+                                "Replace the hardcoded credential with an "
+                                "environment variable read at runtime."
+                            ),
+                            "file": _file,
+                            "before": (
+                                "API_KEY = 'sk-live-XXXXXXXXXXXXXXXX'  # "
+                                "leaked secret"
+                            ),
+                            "after": (
+                                "import os\n"
+                                "API_KEY = os.environ['API_KEY']  # raises "
+                                "KeyError if missing"
+                            ),
+                        }
+                    ]
+                else:
+                    recommendation = (
+                        f"**Summary.** This finding comes from the `{vuln.get('rule_id')}` "
+                        f"rule. The Code Scanning tab in GitHub has the full advisory "
+                        f"(CVE / GHSA id, affected version range, and patch version).\n\n"
+                        f"**Next steps.**\n"
+                        f"1. Open the GitHub Code Scanning alert (link in the panel above) "
+                        f"and note the CVE / GHSA id and the safe version.\n"
+                        f"2. If the rule is a dependency vulnerability, run the upgrade "
+                        f"command from the advisory (e.g. `npm install <pkg>@<safe-version>` "
+                        f"or `pip install <pkg>==<safe-version>`).\n"
+                        f"3. If the rule is a code-level issue, edit "
+                        f"`{vuln.get('file_location') or 'the flagged file'}` and apply the "
+                        f"fix described in the advisory.\n"
+                        f"4. Re-run the analysis to confirm the finding is gone."
+                    )
 
     return {
         "rule_id": vuln.get("rule_id"),
