@@ -102,4 +102,4 @@ echo "Expiry: $(openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -dates | grep 
 echo ""
 echo "Now update nginx/prod-nginx.conf if needed, then run:"
 echo "  cd /opt/ai-devsecops"
-echo "  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d nginx"
+echo "  docker compose -f docker-compose.prod.yml up -d nginx"

@@ -7,7 +7,7 @@ KEEP_DAYS=7
 
 mkdir -p "$BACKUP_DIR"
 
-COMPOSE_FILE="-f /opt/ai-devsecops/docker-compose.yml -f /opt/ai-devsecops/docker-compose.prod.yml"
+COMPOSE_FILE="-f /opt/ai-devsecops/docker-compose.prod.yml"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Postgres backup..."
 

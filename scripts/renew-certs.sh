@@ -28,8 +28,8 @@ RENEWED=$(find /etc/letsencrypt/live -name "cert.pem" -type f -exec openssl x509
 if [ -n "$RENEWED" ]; then
     log "Certificates renewed, reloading nginx..."
     cd /opt/ai-devsecops
-    docker compose -f docker-compose.yml -f docker-compose.prod.yml exec nginx nginx -s reload 2>/dev/null || \
-        docker compose -f docker-compose.yml -f docker-compose.prod.yml restart nginx
+    docker compose -f docker-compose.prod.yml exec nginx nginx -s reload 2>/dev/null || \
+        docker compose -f docker-compose.prod.yml restart nginx
     log "Nginx reloaded successfully"
 else
     log "No certificates renewed (not due yet)"
