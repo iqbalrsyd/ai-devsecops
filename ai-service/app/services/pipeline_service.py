@@ -1447,6 +1447,13 @@ def _apply_cached_insights(state: PipelineEngineerState, insights: dict):
     state["detected_deployment"] = insights.get("deployment") or state.get("detected_deployment", {})
     state["recommended_deployment_target"] = insights.get("recommended_deployment_target") or state.get("recommended_deployment_target")
 
+    # Custom-jobs toggle: read the env var so operators can force the
+    # standard pipeline only (skip domain-specific jobs). The
+    # workflow_generator also implicitly forces `general_only` when
+    # domain_confidence < 0.5 (heuristic veto fell back to "general").
+    from app.agents.general_only import is_general_only
+    state["general_only"] = is_general_only()
+
     if insights.get("security_needs"):
         state["inferred_security_needs"] = insights.get("security_needs")
     else:

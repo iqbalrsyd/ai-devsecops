@@ -4536,13 +4536,6 @@ def _build_workflow_yaml(
                 "          # error). Create an empty dir so the import is a no-op",
                 "          # rather than a hard failure.",
                 "          mkdir -p .semgrep",
-                "          # Only run semgrep if at least one registry config is",
-                "          # declared; otherwise the previous run already proved",
-                "          # the repo has no language that maps to a registry ruleset.",
-                "          if [ -z \"${{ env.SEMGREP_REGISTRY_CONFIGS }}\" ]; then",
-                "            echo '::notice::No Semgrep registry configs selected for this language; writing empty SARIF.'",
-                "            exit 0",
-                "          fi",
                 "          docker run --rm \\",
                 "            -v \"${{ github.workspace }}:/src\" \\",
                 "            returntocorp/semgrep:1.99.0 \\",
@@ -5181,7 +5174,19 @@ def _build_workflow_yaml(
     # _build_workflow_yaml that only care about the static job
     # shapes). Use a safe fallback so the function still works.
     _state = state if state is not None else {}
-    for design in (_state.get("job_designs") or []):
+    # Custom-jobs gate. Skip the LLM-designed jobs when:
+    #   1. `state["general_only"]` is True (operator toggled the
+    #      `AI_DEVSECOPS_GENERAL_ONLY` env var).
+    #   2. Domain confidence is below 0.5 (heuristic veto fell back
+    #      to "general" because the LLM classifier over-fit on a
+    #      weak signal — e.g. a healthcare billing repo got
+    #      misclassified as e-commerce).
+    # The standard jobs above (lint, test, sast, secret-scan,
+    # dependency-scan, container-scan) are still emitted.
+    _skip_custom_jobs = bool(_state.get("general_only")) or (
+        (domain_confidence or 0.0) < 0.5
+    )
+    for design in (_state.get("job_designs") or []) if not _skip_custom_jobs else []:
         if not isinstance(design, dict):
             continue
         design_name = design.get("name", "").strip()

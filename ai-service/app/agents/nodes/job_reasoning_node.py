@@ -52,17 +52,42 @@ jobs that are SPECIFIC to the codebase — not generic domain templates.
 
 Supported domains: e-commerce, blog, iot (+ general fallback).
 Supported architectures: monolithic (saja).
-DO NOT invent custom jobs for unsupported domains such as healthcare,
-fintech, education, or microservices. Map the repository to one of
-the three supported domains and stay within that scope. Arsitektur
-bukan variabel eksperimen (batasan B7).
+Arsitektur bukan variabel eksperimen (batasan B7).
+
+## Custom jobs are driven by BUSINESS FEATURES, not by domain label
+
+The domain label (e-commerce / blog / iot / general) is a NAME for
+documentation purposes. The actual job design MUST be driven by the
+business features and applicable security coverages you can SEE in
+the source code. Concretely:
+
+  - If the repository uses payment APIs (Stripe, Midtrans, Xendit,
+    PayPal, Braintree, etc.) — design `payment_security` jobs even
+    if the domain label is healthcare.
+  - If the repository handles patient records, FHIR resources, or
+    ICD-10 codes — design `authentication_security` /
+    `data_security` jobs (HIPAA-specific templates are NOT emitted
+    because they are out of scope, but auth + data security covers
+    the same surface).
+  - If the repository publishes markdown / blog posts / comments —
+    design `cms_security` jobs.
+  - If the repository talks to MQTT brokers or ships firmware —
+    design `iot_security` jobs.
+  - If the repository does plain CRUD with no business-feature
+    signal — emit no custom jobs (return `job_designs: []`).
+
+The custom job NAME should describe the business feature / coverage,
+NOT the domain. Use prefixes like `payment-`, `cms-`, `auth-`,
+`data-`, `iot-`, `container-` instead of `ecommerce-`, `blog-`,
+`healthcare-`, etc. This keeps the generated jobs reusable across
+domains.
 
 ## Repository Context
 
 Language: {language}
 Frameworks: {frameworks}
 Architecture: {architecture}
-Domain: {domain}
+Domain: {domain}                ← informational only, do NOT key off this
 Sub-type: {sub_type}
 Deployment: {deployment}
 
@@ -101,6 +126,13 @@ For each custom job you decide to create:
      Code Scanning.
   4. Cite at least one finding OR source pattern in the `reasoning`
      field — be specific.
+  5. Name the job using the coverage / business feature, NOT the
+     domain. Use kebab-case, ≤ 40 chars. Examples:
+     - `payment-stripe-webhook-verify`   (NOT `ecommerce-stripe-...`)
+     - `auth-weak-jwt-secret`            (applies to any repo with JWT)
+     - `cms-markdown-xss`                (applies to blog or healthcare-blog)
+     - `data-sql-injection`              (applies to any repo with SQL)
+     - `iot-mqtt-tls-required`           (only when MQTT is present)
 
 Action types you can use (one per action):
   - `shell_check`         : a `run:` script that exits non-zero on bad pattern
@@ -117,9 +149,9 @@ Action types you can use (one per action):
 - If the repo has no clear custom-job-worthy pattern, return
   `job_designs: []` — empty is a valid answer.
 - Maximum 3 job designs per run (focus on the highest-risk coverage).
-- DO NOT design jobs specific to healthcare (PHI/HIPAA/FHIR),
-  fintech (ledger/transfer), education (LMS/SCORM), or pure
-  microservices. Those domains are out of scope.
+- DO NOT use the domain label in the job name. The same job can
+  apply across domains (e.g. `payment-stripe-webhook-verify` is
+  valid for an e-commerce shop OR a healthcare billing service).
 
 ## Return ONLY valid JSON
 

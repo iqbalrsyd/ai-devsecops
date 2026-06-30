@@ -27,6 +27,15 @@ class PipelineEngineerState(TypedDict):
     # repo" — caller should rely on the universal Trivy fs scan only.
     active_language_profiles: list[str]
 
+    # Skip custom (domain-specific) jobs and emit only the standard
+    # set (lint, test, sast, secret-scan, dependency-scan,
+    # container-scan). Populated by `pipeline_service` from the
+    # `AI_DEVSECOPS_GENERAL_ONLY` env var. Also implicitly True when
+    # `domain_confidence < 0.5` (heuristic veto fell back to
+    # "general" because the LLM classifier over-fit on a weak
+    # signal). The `workflow_generator_node` honours this flag.
+    general_only: bool
+
     # Tahap 1 (Tambah v9)
     detected_domain: str | None
     domain_sub_type: str | None
