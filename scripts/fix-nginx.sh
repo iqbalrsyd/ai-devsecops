@@ -3,32 +3,49 @@ set -e
 
 cd /opt/ai-devsecops
 
-echo "=== Fix Nginx: pull + force recreate ==="
+echo "=== Fix Nginx: pull + fix cert + force recreate ==="
 
-# 1. Fetch & reset ke remote
-echo "[1/5] Fetching latest from origin..."
+# 1. Fetch & reset
+echo "[1/7] Fetching latest from origin..."
 git fetch origin
-
-echo "[2/5] Force reset to origin/fix/ai-devsecops-custom-needs..."
+echo "[2/7] Force reset to origin/fix/ai-devsecops-custom-needs..."
 git reset --hard origin/fix/ai-devsecops-custom-needs
 
-# 2. Verify file updated
-echo "[3/5] Verifying prod-nginx.conf (should NOT have 'upstream'):"
+# 2. Verify nginx config updated
+echo "[3/7] Verifying prod-nginx.conf..."
 if grep -q "upstream backend_upstream" nginx/prod-nginx.conf; then
-    echo "  ERROR: file still has 'upstream' block! Force pull may have failed."
+    echo "  ERROR: still has 'upstream' block! Force pull failed."
     exit 1
 else
-    echo "  OK - no upstream block found"
+    echo "  OK - no upstream block (resolver-via-variable pattern)"
 fi
 
-# 3. Force recreate nginx
-echo "[4/5] Force recreating nginx container..."
-docker compose -f docker-compose.prod.yml up -d --force-recreate --no-deps nginx
+# 3. Check cert exists
+echo "[4/7] Check cert files..."
+CERT_PATH="/etc/letsencrypt/live/app.iqbalhidayatrasyad.blog"
+if [ ! -f "$CERT_PATH/fullchain.pem" ]; then
+    echo "  ERROR: cert files missing at $CERT_PATH"
+    echo "  Run: sudo bash scripts/init-letsencrypt.sh app.iqbalhidayatrasyad.blog admin@iqbalhidayatrasyad.blog"
+    exit 1
+fi
+echo "  OK - cert files exist"
 
-# 4. Wait & check
+# 4. Recreate symlinks
+echo "[5/7] Recreate cert symlinks..."
+sudo rm -f /opt/ai-devsecops/nginx/certs/app.iqbalhidayatrasyad.blog
+sudo rm -f /opt/ai-devsecops/nginx/letsencrypt/app.iqbalhidayatrasyad.blog
+sudo ln -sfn "$CERT_PATH" /opt/ai-devsecops/nginx/certs/app.iqbalhidayatrasyad.blog
+sudo ln -sfn "$CERT_PATH" /opt/ai-devsecops/nginx/letsencrypt/app.iqbalhidayatrasyad.blog
+ls -la /opt/ai-devsecops/nginx/certs/
+
+# 5. Force recreate nginx
+echo "[6/7] Force recreating nginx container..."
+docker compose -f docker-compose.prod.yml up -d --force-recreate --no-deps nginx
 sleep 5
-echo "[5/5] Nginx log:"
-docker logs ai-devsecops-nginx-1 --tail=20
+
+# 6. Check
+echo "[7/7] Nginx log:"
+docker logs ai-devsecops-nginx-1 --tail=15
 
 echo ""
 echo "=== Testing ==="
