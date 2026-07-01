@@ -56,7 +56,7 @@ echo "[1/5] Login as $USER_EMAIL..."
 echo "  (testing nginx -> backend connectivity)..."
 
 # Test 0: RAM check
-echo "  RAM available: $(free -m | awk 'NR==2{printf \"%.0f MB\", $7}')"
+echo "  RAM available: $(free -m | awk 'NR==2{printf "%.0f MB", $7}')"
 echo ""
 
 # Test 1: Is nginx listening?
@@ -85,11 +85,11 @@ echo ""
 
 # Test 3: Direct login (HTTPS via nginx)
 echo "  Calling POST https://localhost/api/v1/auth/login..."
-LOGIN=$(curl -sL --max-time 30 -X POST https://localhost/api/v1/auth/login \
+LOGIN=$(curl -skL --max-time 30 -X POST https://localhost/api/v1/auth/login \
     -H "Content-Type: application/json" \
     -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$LOGIN_PASS\"}" 2>&1)
-echo "  Raw response (first 200 chars):"
-echo "$LOGIN" | head -c 200
+echo "  HTTPS login raw (first 300 chars):"
+echo "$LOGIN" | head -c 300
 echo ""
 TOKEN=$(echo "$LOGIN" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('access_token',''))" 2>/dev/null)
 if [ -z "$TOKEN" ]; then
