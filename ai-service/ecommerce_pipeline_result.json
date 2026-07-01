@@ -1,0 +1,607 @@
+
+{
+  "status": "analyzed",
+  "repository": "iqbalrsyd/eccomerce-monolith-vuln",
+  "technologies": {
+    "primary_language": "JavaScript",
+    "primary_language_confidence": 1.0,
+    "primary_language_reason": "Node.js runtime confirmed via Dockerfile (FROM node:14), package.json manifest, and server.js entry point using Node.js execution (node src/server.js)",
+    "frameworks": [
+      "Express"
+    ],
+    "framework_confidences": [
+      1.0
+    ],
+    "build_tools": [
+      "npm"
+    ],
+    "package_manager": "npm",
+    "package_manager_confidence": 1.0,
+    "test_framework": "Jest",
+    "database": "SQLite",
+    "runtime": "Node.js 14"
+  },
+  "architecture": "monolithic",
+  "architecture_detail": {
+    "architecture_type": "monolithic",
+    "architecture_confidence": 0.92,
+    "architecture_reason": "Single Node.js/Express server with one entry point (server.js), shared SQLite database (db.js), and unified deployment via single Dockerfile. The routes directory indicates code organization but not separate services. No evidence of independent deployment, service discovery, or distributed architecture. All components share the same runtime, database, and container.",
+    "service_count": 1,
+    "service_names": [
+      "main-api"
+    ],
+    "has_api_gateway": false,
+    "has_message_queue": false,
+    "has_database_config": true,
+    "is_containerized": true,
+    "has_shared_libraries": false
+  },
+  "security_needs": [],
+  "generated_workflow": "name: CI DevSecOps (javascript)\n# Domain: e-commerce (confidence: 0.70)\n# Architecture: monolithic\n# Priority threats: SQL injection vulnerabilities via unsanitized queries in SQLite database; Cross\u2011site scripting (XSS) due to improper output encoding of product details; Broken authentication and session management through insecure JWT handling; Insecure direct object references exposing order or customer data\n\n\"on\":\n  push:\n    branches: [main, master, develop]\n  pull_request:\n    branches: [main, master, develop]\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: ${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: true\n\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n    continue-on-error: false\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n\n      - name: Set up Node.js\n        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020\n        with:\n          node-version: '20'\n          cache: 'npm'\n\n      - name: Install dependencies\n        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund\n\n      - name: Run ESLint\n        run: |\n          if [ -f package.json ] && grep -q '\"lint\"' package.json; then\n            npm run lint --if-present\n          else\n            echo 'No lint script defined; skipping.'\n          fi\n\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n    continue-on-error: false\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n\n      - name: Set up Node.js\n        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020\n        with:\n          node-version: '20'\n          cache: 'npm'\n\n      - name: Install dependencies\n        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund\n\n      - name: Run tests\n        run: npm test --if-present || true\n\n  build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n    continue-on-error: false\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n\n      - name: Set up Node.js\n        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020\n        with:\n          node-version: '20'\n          cache: 'npm'\n\n      - name: Install dependencies\n        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund\n\n      - name: Build application\n        run: npm run build --if-present || true\n\n  sast:\n    runs-on: ubuntu-latest\n    timeout-minutes: 20\n    continue-on-error: false\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n\n      - name: Run semgrep\n        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d\n        with:\n          config: p/owasp-top-ten\n        continue-on-error: false\n\n  dependency-scan:\n    runs-on: ubuntu-latest\n    timeout-minutes: 20\n    continue-on-error: false\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n\n      - name: Set up Node.js\n        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020\n        with:\n          node-version: '20'\n          cache: 'npm'\n\n      - name: Install dependencies\n        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund\n\n      - name: Run npm audit (CVE check)\n        run: npm audit --audit-level=high\n\n      - name: Run Trivy filesystem scan\n        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8\n        with:\n          scan-type: 'fs'\n          scan-ref: '.'\n          format: 'sarif'\n          output: 'trivy-fs-results.sarif'\n          severity: 'HIGH,CRITICAL'\n\n\n  secret-scan:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n    continue-on-error: false\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n          fetch-depth: 0\n\n      - name: Run Gitleaks\n        uses: gitleaks/gitleaks-action@44c470ffc35caa8b1eb3e8012ca53c2f9bea4eb5\n        with:\n          args: --redact\n\n  container-build:\n    runs-on: ubuntu-latest\n    timeout-minutes: 20\n    continue-on-error: false\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n\n      - name: Build Docker image\n        run: docker build -t app:latest .\n\n  container-scan:\n    runs-on: ubuntu-latest\n    timeout-minutes: 20\n    continue-on-error: false\n    needs: container-build\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n\n      - name: Build Docker image\n        run: docker build -t app:latest .\n\n      - name: Scan image with Trivy\n        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8\n        with:\n          image-ref: 'app:latest'\n          format: 'sarif'\n          output: 'trivy-image-results.sarif'\n          severity: 'HIGH,CRITICAL'\n\n  iac-scan:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n    continue-on-error: false\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n\n      - name: Scan Dockerfile with Trivy\n        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8\n        with:\n          scan-type: 'config'\n          scan-ref: '.'\n          format: 'sarif'\n          output: 'trivy-config-results.sarif'\n          severity: 'HIGH,CRITICAL'\n\n  sbom:\n    runs-on: ubuntu-latest\n    timeout-minutes: 15\n    continue-on-error: false\n    steps:\n      - name: Checkout code\n        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5\n        with:\n          persist-credentials: false\n\n      - name: Install Syft\n        run: |\n          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin\n\n      - name: Generate SBOM\n        run: syft dir:. -o spdx-json=sbom.spdx.json\n",
+  "generated_stages": [
+    "lint",
+    "test",
+    "build",
+    "sast",
+    "dependency-scan",
+    "secret-scan",
+    "container-build",
+    "container-scan",
+    "iac-scan",
+    "sbom"
+  ],
+  "stage_explanations": [
+    {
+      "name": "lint",
+      "reason": "JavaScript/TypeScript repository detected (package manager: npm); ESLint enforces code-quality and style rules.",
+      "status": "recommended",
+      "tool": "eslint"
+    },
+    {
+      "name": "test",
+      "reason": "Test framework 'Jest' detected; run unit tests before security scans.",
+      "status": "recommended",
+      "tool": "Jest"
+    },
+    {
+      "name": "build",
+      "reason": "Build tool detected; verify the application compiles successfully.",
+      "status": "recommended",
+      "tool": "npm run build"
+    },
+    {
+      "name": "sast",
+      "reason": "JavaScript/TypeScript repository; Semgrep with OWASP ruleset detects injection, XSS, and insecure deserialization issues.",
+      "status": "recommended",
+      "tool": "semgrep"
+    },
+    {
+      "name": "dependency-scan",
+      "reason": "JavaScript/TypeScript repository; runs `npm audit` for CVE detection and Trivy filesystem scan for additional vulnerability coverage.",
+      "status": "recommended",
+      "tool": "npm audit + trivy"
+    },
+    {
+      "name": "secret-scan",
+      "reason": "Detects hardcoded API keys, tokens, and credentials in source code.",
+      "status": "recommended",
+      "tool": "gitleaks"
+    },
+    {
+      "name": "container-build",
+      "reason": "Dockerfile detected; build the container image before scanning it.",
+      "status": "recommended",
+      "tool": "docker build"
+    },
+    {
+      "name": "container-scan",
+      "reason": "Scan the built container image for OS and library CVEs.",
+      "status": "recommended",
+      "tool": "trivy image"
+    },
+    {
+      "name": "iac-scan",
+      "reason": "Dockerfile/IaC detected; audit Dockerfile for security misconfigurations.",
+      "status": "recommended",
+      "tool": "trivy config"
+    },
+    {
+      "name": "sbom",
+      "reason": "Generate a Software Bill of Materials for the containerized application.",
+      "status": "recommended",
+      "tool": "syft"
+    }
+  ],
+  "explanation": "Architecture: monolithic.\nGenerated 10 CI stages: lint, test, build, sast, dependency-scan, secret-scan, container-build, container-scan, iac-scan, sbom.\nStages were selected based on the detected language, package manager, test framework, and security findings.\n- lint: JavaScript/TypeScript repository detected (package manager: npm); ESLint enforces code-quality and style rules.\n- test: Test framework 'Jest' detected; run unit tests before security scans.\n- build: Build tool detected; verify the application compiles successfully.\n- sast: JavaScript/TypeScript repository; Semgrep with OWASP ruleset detects injection, XSS, and insecure deserialization issues.\n- dependency-scan: JavaScript/TypeScript repository; runs `npm audit` for CVE detection and Trivy filesystem scan for additional vulnerability coverage.\n- secret-scan: Detects hardcoded API keys, tokens, and credentials in source code.\n- container-build: Dockerfile detected; build the container image before scanning it.\n- container-scan: Scan the built container image for OS and library CVEs.\n- iac-scan: Dockerfile/IaC detected; audit Dockerfile for security misconfigurations.\n- sbom: Generate a Software Bill of Materials for the containerized application.",
+  "vignette_context": {
+    "architecture_insert": "You are generating a SINGLE workflow for a monolithic application. All security scans should run in one sequential pipeline covering the entire codebase. Use a single build artifact.",
+    "architecture_type": "monolithic",
+    "domain_brief": "e-commerce (confidence: 0.70)",
+    "detected_domain": "e-commerce",
+    "domain_confidence": 0.7,
+    "priority_threats": [
+      "SQL injection vulnerabilities via unsanitized queries in SQLite database",
+      "Cross\u2011site scripting (XSS) due to improper output encoding of product details",
+      "Broken authentication and session management through insecure JWT handling",
+      "Insecure direct object references exposing order or customer data",
+      "Payment card data exposure due to lack of PCI\u2011DSS compliant controls",
+      "Exploitation of known vulnerabilities in third\u2011party dependencies (e.g., lodash)",
+      "Lack of input validation on checkout endpoints leading to price manipulation",
+      "Inadequate transport security allowing credential interception"
+    ]
+  },
+  "validation_passed": true,
+  "validation_errors": [],
+  "validation_warnings": [],
+  "warnings": [],
+  "removed_legacy_workflows": [],
+  "github_branch": null,
+  "github_pr_number": null,
+  "github_pr_url": null,
+  "workflow_run_id": null,
+  "workflow_status": null,
+  "workflow_conclusion": null,
+  "summary": null,
+  "findings": [],
+  "risk_score": null,
+  "risk_score_metadata": null,
+  "security_standards_coverage_score": null,
+  "security_standards_coverage_score_metadata": null,
+  "security_standards_coverage_mappings": [],
+  "compliance_score": null,
+  "compliance_score_metadata": null,
+  "compliance_mappings": [],
+  "severity_breakdown": null,
+  "security_coverage_score": null,
+  "security_coverage_metadata": null,
+  "recommendations": [],
+  "errors": [
+    "[persist] lookup error: (psycopg2.OperationalError) could not translate host name \"postgres\" to address: Name or service not known\n\n(Background on this error at: https://sqlalche.me/e/20/e3q8)"
+  ],
+  "dashboard_findings": {
+    "security_finding": [],
+    "workflow_config_issue": [],
+    "maintenance_warning": [],
+    "external_service_issue": [],
+    "security_count": 0,
+    "workflow_config_count": 0,
+    "maintenance_count": 0,
+    "external_count": 0,
+    "total_count": 0
+  },
+  "workflow_config_issues": [],
+  "maintenance_warnings": [],
+  "external_service_issues": [],
+  "remediation_recommendations": [],
+  "workflow_annotations": [],
+  "extra_params": {},
+  "unified_response": {
+    "repository_analysis": {
+      "technologies": {
+        "primary_language": "JavaScript",
+        "primary_language_confidence": 1.0,
+        "primary_language_reason": "Node.js runtime confirmed via Dockerfile (FROM node:14), package.json manifest, and server.js entry point using Node.js execution (node src/server.js)",
+        "frameworks": [
+          "Express"
+        ],
+        "framework_confidences": [
+          1.0
+        ],
+        "build_tools": [
+          "npm"
+        ],
+        "package_manager": "npm",
+        "package_manager_confidence": 1.0,
+        "test_framework": "Jest",
+        "database": "SQLite",
+        "runtime": "Node.js 14"
+      },
+      "architecture": {
+        "architecture_type": "monolithic",
+        "architecture_confidence": 0.92,
+        "architecture_reason": "Single Node.js/Express server with one entry point (server.js), shared SQLite database (db.js), and unified deployment via single Dockerfile. The routes directory indicates code organization but not separate services. No evidence of independent deployment, service discovery, or distributed architecture. All components share the same runtime, database, and container.",
+        "service_count": 1,
+        "service_names": [
+          "main-api"
+        ],
+        "has_api_gateway": false,
+        "has_message_queue": false,
+        "has_database_config": true,
+        "is_containerized": true,
+        "has_shared_libraries": false
+      },
+      "deployment": {
+        "docker": true,
+        "docker_confidence": 0.9,
+        "docker_reason": "Dockerfile detected in repository root, indicating containerization with Docker. Node.js application with package.json confirms suitable runtime for containerization.",
+        "docker_compose": false,
+        "kubernetes": false,
+        "kubernetes_confidence": 0.0,
+        "kubernetes_reason": "No Kubernetes manifests (k8s/ directory, Deployment/Service YAML files) detected in repository.",
+        "terraform": false,
+        "helm": false,
+        "cloud_provider": null,
+        "recommended_deployment_target": "Docker Host",
+        "alternative_deployment_targets": [],
+        "deployment_reason": "Dockerfile present indicates container-based deployment. Recommended target is Docker Host (VM/server with Docker daemon) for immediate deployment. This is ideal for Node.js applications as it provides full control over runtime environment. The application structure (src/server.js, src/db.js, src/routes/) suggests a standard Express.js API server that containerizes well without requiring orchestration complexity."
+      },
+      "domain": {
+        "detected_domain": "e-commerce",
+        "domain_confidence": 0.7,
+        "domain_evidence": [
+          "Repository name contains the substring 'eccomerce', strongly indicating an e\u2011commerce application",
+          "Use of JWT and cookie-parser suggests user authentication and session management typical for online stores",
+          "Presence of better\u2011sqlite3 can be used to store product, order, or inventory data in an e\u2011commerce context",
+          "Express framework is commonly used to build web storefronts",
+          "Inclusion of Jest for testing indicates a structured development process common for e\u2011commerce platforms"
+        ],
+        "domain_threats": [
+          "SQL injection vulnerabilities via unsanitized queries in SQLite database",
+          "Cross\u2011site scripting (XSS) due to improper output encoding of product details",
+          "Broken authentication and session management through insecure JWT handling",
+          "Insecure direct object references exposing order or customer data",
+          "Payment card data exposure due to lack of PCI\u2011DSS compliant controls",
+          "Exploitation of known vulnerabilities in third\u2011party dependencies (e.g., lodash)",
+          "Lack of input validation on checkout endpoints leading to price manipulation",
+          "Inadequate transport security allowing credential interception"
+        ],
+        "attack_surfaces": [
+          "Container Image",
+          "Dockerfile Config",
+          "Image Layer Secrets"
+        ]
+      },
+      "detected_at": "2026-06-18T10:29:08.759013+00:00Z"
+    },
+    "security_requirements": {
+      "security_controls": [
+        {
+          "control": "lint",
+          "status": "recommended",
+          "reason": "Code quality checks help identify security anti-patterns and reduce vulnerabilities. For the e-commerce domain, linting with ESLint security plugins can catch issues like insecure JWT configurations, improper input handling patterns, and unsafe SQL query constructions that map to domain-specific threats including SQL injection, XSS, and broken authentication.",
+          "tool": "eslint",
+          "tool_version": "8.57.0"
+        },
+        {
+          "control": "test",
+          "status": "recommended",
+          "reason": "Jest test framework detected. Comprehensive test coverage reduces security vulnerabilities by catching logic flaws that could lead to price manipulation attacks on checkout endpoints (domain threat: lack of input validation leading to price manipulation). Unit tests should include security test cases for authentication flows, input validation, and access control.",
+          "tool": "jest",
+          "tool_version": "29.7.0"
+        },
+        {
+          "control": "build",
+          "status": "recommended",
+          "reason": "npm detected as build tool. Standard build process for Node.js applications ensures proper dependency resolution and allows integration of security checks post-build. The build stage is essential for preparing the artifact that will be containerized and deployed to the Docker Host.",
+          "tool": "npm",
+          "tool_version": "10.2.5"
+        },
+        {
+          "control": "sast",
+          "status": "recommended",
+          "reason": "Static Application Security Testing is essential for the e-commerce domain to address multiple domain-specific threats: SQL injection vulnerabilities via unsanitized queries in SQLite, XSS due to improper output encoding of product details, broken authentication through insecure JWT handling, insecure direct object references exposing order/customer data, and inadequate transport security. SAST tools can detect these issues in source code before deployment.",
+          "tool": "semgrep",
+          "tool_version": "1.68.0"
+        },
+        {
+          "control": "dependency_scan",
+          "status": "recommended",
+          "reason": "npm package manager detected with third-party dependencies. The e-commerce domain faces threats from exploitation of known vulnerabilities in third-party dependencies (e.g., lodash). Dependency scanning identifies vulnerable packages before they can be exploited, critical for protecting payment card data and customer information stored in SQLite.",
+          "tool": "npm-audit",
+          "tool_version": "10.0.1"
+        },
+        {
+          "control": "cve_scan",
+          "status": "recommended",
+          "reason": "CVE database scanning is mandatory per attack surface requirements and addresses the domain-specific threat of exploitation of known vulnerabilities in third-party dependencies. This complements dependency_scan by cross-referencing packages against national vulnerability databases to identify CVEs affecting lodash and other dependencies that could compromise e-commerce transaction security.",
+          "tool": "trivy",
+          "tool_version": "0.50.0"
+        },
+        {
+          "control": "secret_scan",
+          "status": "recommended",
+          "reason": "Secret detection is mandatory per attack surface coverage requirements and addresses critical e-commerce domain threats including payment card data exposure (PCI-DSS compliance), broken authentication through exposed JWT secrets, and insecure direct object references from leaked API keys. The monolithic architecture with Docker deployment increases risk of image layer secrets exposure. Scan for hardcoded credentials, API keys, and JWT secrets in source code and Dockerfile.",
+          "tool": "gitleaks",
+          "tool_version": "8.18.1"
+        },
+        {
+          "control": "container_scan",
+          "status": "recommended",
+          "reason": "Container vulnerability scanning is mandatory per attack surface coverage (Container Image, Dockerfile Config, Image Layer Secrets). For the e-commerce application deployed on Docker Host, container scanning detects vulnerabilities in the Node.js 14 base image and its layers that could lead to data breaches affecting payment card data and customer information. Must scan image layers for secrets and OS-level CVEs.",
+          "tool": "trivy",
+          "tool_version": "0.50.0"
+        },
+        {
+          "control": "container_build",
+          "status": "recommended",
+          "reason": "Container image build is mandatory per mandatory controls requirements. The Dockerfile detected in the repository root for the Express/Node.js monolithic application must be built securely. Build process should use multi-stage builds to minimize image size and attack surface, avoid embedding secrets in layers, and use specific version tags instead of 'latest' for the Node.js base image.",
+          "tool": "docker",
+          "tool_version": "24.0.7"
+        },
+        {
+          "control": "iac_scan",
+          "status": "recommended",
+          "reason": "Infrastructure as Code scanning is mandatory per mandatory controls and addresses attack surface coverage for Dockerfile Config. The Dockerfile detected in the repository root represents infrastructure configuration that must be secured. IAC scanning ensures no hardcoded secrets, proper base image pinning, minimal package installation, and correct security configurations for the e-commerce application's Docker Host deployment.",
+          "tool": "hadolint",
+          "tool_version": "2.12.0"
+        },
+        {
+          "control": "license_check",
+          "status": "optional",
+          "reason": "License compliance scanning is optional but recommended for e-commerce applications handling payment data. PCI-DSS compliance requires awareness of all software components and their licenses. npm detected provides opportunity to scan dependencies for problematic licenses (GPL, AGPL, etc.) that may create legal liability or compliance issues for the e-commerce platform.",
+          "tool": "license-cop",
+          "tool_version": "2.3.0"
+        },
+        {
+          "control": "sbom",
+          "status": "recommended",
+          "reason": "Software Bill of Materials generation is recommended for containerized e-commerce applications. SBOM provides visibility into all components for PCI-DSS compliance (addressing payment card data exposure threat), vulnerability management, and incident response. For the monolithic Docker-based Node.js application, SBOM helps track dependencies and their security status over time.",
+          "tool": "syft",
+          "tool_version": "1.1.0"
+        },
+        {
+          "control": "deploy",
+          "status": "not_required",
+          "reason": "No explicit CD platform configuration (GitHub Pages, Heroku, Railway, etc.) detected. Deployment to Docker Host is handled externally. This control is not applicable until a specific deployment platform is configured.",
+          "tool": null,
+          "tool_version": null
+        },
+        {
+          "control": "per_service_sast",
+          "status": "not_required",
+          "reason": "Monolithic architecture detected with single service (main-api). Per-service SAST is only applicable to microservices or modular monolith architectures where services have separate code directories. The single server.js entry point and unified deployment do not require per-service scanning.",
+          "tool": null,
+          "tool_version": null
+        },
+        {
+          "control": "per_service_dep_scan",
+          "status": "not_required",
+          "reason": "Monolithic architecture with single service eliminates need for per-service dependency scanning. All dependencies are managed through the single package.json, and the entire application is deployed as one unit. Standard dependency scanning on the unified codebase is sufficient.",
+          "tool": null,
+          "tool_version": null
+        },
+        {
+          "control": "api_gateway_test",
+          "status": "not_required",
+          "reason": "No API gateway detected in architecture. The e-commerce application uses Express.js directly without an API gateway layer. Without an API gateway, this control is not applicable. Alternative authentication and rate limiting must be handled within the Express application.",
+          "tool": null,
+          "tool_version": null
+        },
+        {
+          "control": "service_mesh_audit",
+          "status": "not_required",
+          "reason": "Kubernetes not detected in deployment configuration. Service mesh auditing for mTLS and network policies is only applicable to Kubernetes deployments. The application is containerized with Docker for Docker Host deployment without orchestration.",
+          "tool": null,
+          "tool_version": null
+        }
+      ],
+      "required_tools": [
+        {
+          "name": "eslint",
+          "purpose": "Code quality and security linting to detect insecure patterns in JavaScript/Node.js code, including improper JWT handling, SQL injection vulnerabilities, and XSS-prone output encoding",
+          "language": "JavaScript"
+        },
+        {
+          "name": "semgrep",
+          "purpose": "Static Application Security Testing (SAST) to identify vulnerabilities in source code including SQL injection, XSS, insecure authentication patterns, and access control issues specific to e-commerce threats",
+          "language": "JavaScript"
+        },
+        {
+          "name": "npm-audit",
+          "purpose": "Dependency vulnerability scanning for npm packages to detect known vulnerabilities in third-party dependencies like lodash that could be exploited",
+          "language": "JavaScript"
+        },
+        {
+          "name": "trivy",
+          "purpose": "Comprehensive vulnerability scanning for both container images (base image CVEs) and application dependencies, addressing mandatory CVE scanning and container scan requirements",
+          "language": "generic"
+        },
+        {
+          "name": "gitleaks",
+          "purpose": "Secret detection to prevent exposure of JWT secrets, API keys, database credentials, and payment card data in source code and Docker image layers",
+          "language": "generic"
+        },
+        {
+          "name": "hadolint",
+          "purpose": "Dockerfile linting to ensure secure container configuration, proper base image usage, and absence of hardcoded secrets in Docker build files",
+          "language": "generic"
+        },
+        {
+          "name": "syft",
+          "purpose": "Software Bill of Materials generation for dependency inventory, supporting PCI-DSS compliance and vulnerability management for the e-commerce platform",
+          "language": "generic"
+        }
+      ],
+      "pipeline_stages": [
+        {
+          "name": "pre-commit-hooks",
+          "order": 1,
+          "required_for": [
+            "lint",
+            "secret_scan"
+          ],
+          "estimated_duration_minutes": 1
+        },
+        {
+          "name": "code-quality",
+          "order": 2,
+          "required_for": [
+            "lint"
+          ],
+          "estimated_duration_minutes": 2
+        },
+        {
+          "name": "static-analysis",
+          "order": 3,
+          "required_for": [
+            "sast"
+          ],
+          "estimated_duration_minutes": 5
+        },
+        {
+          "name": "secret-detection",
+          "order": 4,
+          "required_for": [
+            "secret_scan"
+          ],
+          "estimated_duration_minutes": 2
+        },
+        {
+          "name": "dependency-scanning",
+          "order": 5,
+          "required_for": [
+            "dependency_scan",
+            "cve_scan"
+          ],
+          "estimated_duration_minutes": 3
+        },
+        {
+          "name": "license-compliance",
+          "order": 6,
+          "required_for": [
+            "license_check"
+          ],
+          "estimated_duration_minutes": 2
+        },
+        {
+          "name": "unit-tests",
+          "order": 7,
+          "required_for": [
+            "test"
+          ],
+          "estimated_duration_minutes": 5
+        },
+        {
+          "name": "build",
+          "order": 8,
+          "required_for": [
+            "build"
+          ],
+          "estimated_duration_minutes": 3
+        },
+        {
+          "name": "sbom-generation",
+          "order": 9,
+          "required_for": [
+            "sbom"
+          ],
+          "estimated_duration_minutes": 2
+        },
+        {
+          "name": "dockerfile-analysis",
+          "order": 10,
+          "required_for": [
+            "iac_scan"
+          ],
+          "estimated_duration_minutes": 1
+        },
+        {
+          "name": "container-build",
+          "order": 11,
+          "required_for": [
+            "container_build"
+          ],
+          "estimated_duration_minutes": 4
+        },
+        {
+          "name": "container-scanning",
+          "order": 12,
+          "required_for": [
+            "container_scan",
+            "cve_scan"
+          ],
+          "estimated_duration_minutes": 5
+        }
+      ],
+      "total_controls": 17,
+      "recommended_count": 11,
+      "optional_count": 1,
+      "not_required_count": 5,
+      "stage_explanations": [
+        {
+          "name": "lint",
+          "reason": "JavaScript/TypeScript repository detected (package manager: npm); ESLint enforces code-quality and style rules.",
+          "status": "recommended",
+          "tool": "eslint"
+        },
+        {
+          "name": "test",
+          "reason": "Test framework 'Jest' detected; run unit tests before security scans.",
+          "status": "recommended",
+          "tool": "Jest"
+        },
+        {
+          "name": "build",
+          "reason": "Build tool detected; verify the application compiles successfully.",
+          "status": "recommended",
+          "tool": "npm run build"
+        },
+        {
+          "name": "sast",
+          "reason": "JavaScript/TypeScript repository; Semgrep with OWASP ruleset detects injection, XSS, and insecure deserialization issues.",
+          "status": "recommended",
+          "tool": "semgrep"
+        },
+        {
+          "name": "dependency-scan",
+          "reason": "JavaScript/TypeScript repository; runs `npm audit` for CVE detection and Trivy filesystem scan for additional vulnerability coverage.",
+          "status": "recommended",
+          "tool": "npm audit + trivy"
+        },
+        {
+          "name": "secret-scan",
+          "reason": "Detects hardcoded API keys, tokens, and credentials in source code.",
+          "status": "recommended",
+          "tool": "gitleaks"
+        },
+        {
+          "name": "container-build",
+          "reason": "Dockerfile detected; build the container image before scanning it.",
+          "status": "recommended",
+          "tool": "docker build"
+        },
+        {
+          "name": "container-scan",
+          "reason": "Scan the built container image for OS and library CVEs.",
+          "status": "recommended",
+          "tool": "trivy image"
+        },
+        {
+          "name": "iac-scan",
+          "reason": "Dockerfile/IaC detected; audit Dockerfile for security misconfigurations.",
+          "status": "recommended",
+          "tool": "trivy config"
+        },
+        {
+          "name": "sbom",
+          "reason": "Generate a Software Bill of Materials for the containerized application.",
+          "status": "recommended",
+          "tool": "syft"
+        }
+      ]
+    },
+    "metadata": {
+      "repository_full_name": "iqbalrsyd/eccomerce-monolith-vuln",
+      "request_type": "repository_pipeline",
+      "errors": [
+        "[persist] lookup error: (psycopg2.OperationalError) could not translate host name \"postgres\" to address: Name or service not known\n\n(Background on this error at: https://sqlalche.me/e/20/e3q8)"
+      ],
+      "error_stage": null
+    },
+    "dashboard_findings": {
+      "security_finding": [],
+      "workflow_config_issue": [],
+      "maintenance_warning": [],
+      "external_service_issue": [],
+      "security_count": 0,
+      "workflow_config_count": 0,
+      "maintenance_count": 0,
+      "external_count": 0,
+      "total_count": 0
+    },
+    "workflow_config_issues": [],
+    "maintenance_warnings": [],
+    "external_service_issues": [],
+    "remediation_recommendations": []
+  }
+}

@@ -7,63 +7,16 @@
 #   - Rule id prefix: <domain>-custom-<slug> (matches llm_generation_config)
 #   - Severity: AI must emit INFO or WARNING only
 #
-# v9.4 (sinkron naskah baru) — per rekomendasi-judul.md:
-#   - 3 domain aktif: e-commerce, blog, iot (R2.2 — pengerucutan 7→3)
-#   - 2 arsitektur aktif: monolitik tradisional, modular monolith (R2.1)
-#   - Domain fintech/healthcare/education DIHAPUS dari sistem
-#   - Judul skripsi: "Model Adaptive Security Assessment Pipeline
-#     Berbasis Analisis Domain-Aware Repository untuk Evaluasi Keamanan"
-#   - AI tidak boleh berhalusinasi keluar dari 3 domain ini
-#
-# v9.6 (sinkron job_reasoning_node v9.5 — perluasan 3→6 jobs/domain):
-#   - CWE focus diperluas di setiap domain agar LLM Tier 3 Semgrep
-#     generator punya context yang sama dengan job_reasoning_node.
-#   - threats + rule_outlines ditambah untuk 3 job baru per domain:
-#       e-commerce: PCI card logging, race condition, refund IDOR
-#       blog:       multer upload hardening, JWT secret/alg, open-redirect
-#       iot:        telemetry encryption, command injection, cert rotation
-#   - Total: e-commerce 20→21 CWE, blog 9→11 CWE, iot 12→13 CWE
-#   - TIDAK menambah domain baru (tetap 3: e-commerce, blog, iot)
-#
-# Standar acuan (R3 + R4.2 naskah):
-#   - OWASP (makro): OWASP Top 10:2021, OWASP API Top 10:2023, OWASP IoT Top 10
-#   - CWE (mikro): MITRE Common Weakness Enumeration untuk Semgrep ruleset
-#   - Domain-specific:
-#       e-commerce → taherdoost2022payment (payment gateway), gupta2017sql (SQLi)
-#       blog → gupta2017xss (XSS), calzavara2020csp (CSP)
-#       IoT → OWASP IoT Top 10 (I1–I10)
-#   - Bukti empiris: meneady2013patch (kerentanan mengelompok per domain)
-#   - Konteks: matter2025context (context-aware security systematic review)
-#
 # Reference: app/agents/semgrep_rules/llm_generation_config.py
-# Naskah source: naskah/rekomendasi-judul.md (R1, R2, R3, R4, R5)
 
-version: "1.1"
-purpose: "Knowledge base for AI agent generating Tier 3 Semgrep rules per detected domain. Limited to 3 supported domains: e-commerce, blog, iot. Acuan OWASP (makro) + CWE (mikro) + referensi jurnal spesifik domain."
-usage: "Lookup detected domain → read cwe_focus + threats + rule_outlines → expand into full Semgrep YAML. Severity & coverage mengikuti rekomendasi naskah R3 (e-commerce, blog, iot)."
+version: "1.0"
+purpose: "Knowledge base for AI agent generating Tier 3 Semgrep rules per detected domain."
+usage: "Lookup detected domain → read cwe_focus + threats + rule_outlines → expand into full Semgrep YAML."
 
 domains:
 
   e-commerce:
-    # Rasional domain (naskah R2.2 + T3):
-    #   Kategori McConnell: Internet Systems (public)
-    #   Fokus mitigasi: serangan eksternal/injeksi (SQLi, XSS), integritas
-    #     transaksi, kebocoran API key payment gateway
-    #   Justifikasi terpilih: representasi domain transactional
-    #
-    # v9.5 (perluasan coverage OWASP API Top 10:2023 + PCI-DSS v4.0):
-    #   12 CWE lama + 8 CWE baru = 20 CWE total
-    #   Tambahan: SSRF (API7), rate limit (API4), missing auth,
-    #   webhook signature, idempotency, brute force, error exposure, JWT expiry
-    #
-    # v9.6 (sinkron 6 job e-commerce di job_reasoning_node):
-    #   +3 CWE untuk align dengan job baru:
-    #     - inventory race condition (CWE-367)
-    #     - PCI card data in logs (CWE-532) — sudah ada, dirapikan entry-nya
-    #     - refund/cancel IDOR (CWE-639) — sudah ada, diturunkan hint-nya
-    #   Total CWE: 20 → 21
     cwe_focus:
-      # === Original 12 CWE (v9.4) ===
       - "CWE-79: Cross-site Scripting"
       - "CWE-89: SQL Injection"
       - "CWE-352: Cross-Site Request Forgery"
@@ -76,35 +29,13 @@ domains:
       - "CWE-312: Cleartext Storage of Sensitive Information"
       - "CWE-319: Cleartext Transmission of Sensitive Information"
       - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
-      # === Tambahan v9.5 (OWASP API Top 10:2023 + PCI-DSS v4.0) ===
-      - "CWE-918: Server-Side Request Forgery (SSRF)"
-      - "CWE-770: Allocation of Resources Without Limits or Throttling"
-      - "CWE-862: Missing Authorization"
-      - "CWE-345: Insufficient Verification of Data Authenticity"
-      - "CWE-754: Improper Check for Unusual or Exceptional Conditions"
-      - "CWE-307: Improper Restriction of Excessive Authentication Attempts"
-      - "CWE-209: Information Exposure Through Error Message"
-      - "CWE-613: Insufficient Session Expiration"
-      # === Tambahan v9.6 (sinkron 3 job baru e-commerce) ===
-      - "CWE-367: Time-of-check Time-of-use (TOCTOU) Race Condition"
     threats:
-      - "SQLi di checkout/order lookup (gupta2017sql)"
+      - "SQLi di checkout/order lookup"
       - "CSRF di payment/checkout endpoint"
-      - "BOLA cart/order (IDOR) — OWASP API1:2023"
+      - "BOLA cart/order (IDOR)"
       - "Price/quantity/discount tampering dari request body"
-      - "Mass assignment (req.body spread) → privilege escalation — OWASP API6:2023"
-      - "PAN/CVV/stripe key di logs atau source (taherdoost2022payment)"
-      - "Webhook tanpa signature check (CWE-345) — OWASP API8:2023"
-      - "Idempotency key hilang di payment endpoint (CWE-754) — OWASP API4:2023"
-      - "SSRF via webhook URL / image fetch dari user input (CWE-918) — OWASP API7:2023"
-      - "No rate limit di /login, /checkout → brute force & resource exhaustion (CWE-770, CWE-307)"
-      - "Endpoint tanpa middleware auth (CWE-862) — OWASP API2:2023"
-      - "JWT tanpa expiresIn → sesi tidak expire (CWE-613)"
-      - "Verbose 500 error expose stack trace (CWE-209)"
-      # === Tambahan v9.6 (sinkron 3 job baru e-commerce) ===
-      - "Card data (PAN/CVV) masuk ke console.log / logger.info / winston.log (CWE-532, PCI DSS 3.2)"
-      - "Stock decrement tanpa atomic guard → TOCTOU race, double-sell (CWE-367)"
-      - "Refund/cancel order endpoint tanpa ownership check → IDOR (CWE-639)"
+      - "Mass assignment (req.body spread) → privilege escalation"
+      - "PAN/CVV/stripe key di logs atau source"  
     rule_outlines:
       - id_skeleton: "ecommerce-custom-...-sqli-cart-lookup"
         hint: "db.query(\"...'$X'...\") atau template literal di order/product query"
@@ -114,85 +45,83 @@ domains:
         hint: "Order.create({...req.body}) atau User.update(req.body) tanpa whitelist"
       - id_skeleton: "ecommerce-custom-...-card-data-log"
         hint: "console.log/logger.info(...cardNumber/cvv/cvc...)"
-      - id_skeleton: "ecommerce-custom-...-webhook-no-signature"
-        hint: "stripe.webhooks.constructEvent tanpa signature verification"
       - id_skeleton: "ecommerce-custom-...-jwt-no-expiry-domain"
         hint: "jwt.sign(payload, secret) tanpa expiresIn option"
-      - id_skeleton: "ecommerce-custom-...-currency-float"
-        hint: "parseFloat(req.body.amount) untuk currency — harus pakai Decimal/bignumber"
-      - id_skeleton: "ecommerce-custom-...-ssrf-user-url"
-        hint: "fetch(req.body.webhookUrl) atau axios(req.query.callback) tanpa validateUrl"
-      - id_skeleton: "ecommerce-custom-...-no-rate-limit-checkout"
-        hint: "app.post('/checkout', handler) tanpa express-rate-limit middleware"
-      - id_skeleton: "ecommerce-custom-...-no-middleware-auth"
-        hint: "router.get('/admin/orders', handler) tanpa requireAuth/requireRole middleware"
-      - id_skeleton: "ecommerce-custom-...-idempotency-key-missing"
-        hint: "payment endpoint tanpa cek header Idempotency-Key"
-      - id_skeleton: "ecommerce-custom-...-login-no-brute-force-protection"
-        hint: "POST /login tanpa rate limit / account lockout"
-      - id_skeleton: "ecommerce-custom-...-stack-trace-exposure"
-        hint: "res.status(500).send(err.stack) atau app.use((err, req, res, next) => res.json(err))"
-      # === Tambahan v9.6 (sinkron 3 job baru e-commerce) ===
-      - id_skeleton: "ecommerce-custom-...-card-pan-in-logger"
-        hint: "console.log/logger.info/winston.log(...cardNumber/cvv/cvc/pan) atau localStorage.setItem('card', ...)"
-      - id_skeleton: "ecommerce-custom-...-stock-non-atomic-decrement"
-        hint: "product.stock -= qty atau await Product.findById(id); product.stock = ... (read-then-write TOCTOU)"
-      - id_skeleton: "ecommerce-custom-...-refund-cancel-no-ownership"
-        hint: "router.post('/refund/:orderId') atau router.post('/order/:id/cancel') tanpa req.user.id === order.userId"
     frameworks: ["stripe", "midtrans", "xendit", "doku", "paypal", "braintree", "razorpay", "adyen", "square", "shopify"]
-    # Skip signals (R2.1 + R2.2): sistem tidak generate rule untuk arsitetktur
-    # yang di luar scope, dan tidak invent domain baru.
-    skip_for: ["kubernetes", "istio", "service-mesh", "healthcare", "fintech", "education"]
+    skip_for: ["kubernetes", "istio", "service-mesh"]
+
+  healthcare:
+    cwe_focus:
+      - "CWE-532: Insertion of Sensitive Information into Log File"
+      - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      - "CWE-319: Cleartext Transmission of Sensitive Information"
+      - "CWE-639: Authorization Bypass Through User-Controlled Key"
+      - "CWE-778: Insufficient Logging"
+      - "CWE-798: Use of Hard-coded Credentials"
+      - "CWE-613: Insufficient Session Expiration"
+      - "CWE-916: Use of Password Hash With Insufficient Computational Effort"
+    threats:
+      - "PHI (patient name, MRN, NIK, diagnosis) di log output"
+      - "Weak/deprecated cipher untuk PHI (createCipher tanpa IV)"
+      - "PHI transmission over HTTP"
+      - "FHIR resource return tanpa consent/ownership check"
+      - "PHI access tanpa audit log"
+      - "Session tanpa expiry (auto-logoff requirement)"
+    rule_outlines:
+      - id_skeleton: "healthcare-custom-...-phi-in-log"
+        hint: "console.log/logger.info(...patientName/MRN/diagnosis/SSN...) tanpa redactor"
+      - id_skeleton: "healthcare-custom-...-weak-cipher-phi"
+        hint: "crypto.createCipher(algo, key) atau createCipheriv tanpa random IV"
+      - id_skeleton: "healthcare-custom-...-fhir-bola"
+        hint: "res.json(fhirPatient) atau return fhirPatient tanpa consent check"
+      - id_skeleton: "healthcare-custom-...-no-audit-phi"
+        hint: "app.get('/patients/:id', handler) tanpa audit log call"
+      - id_skeleton: "healthcare-custom-...-weak-bcrypt-rounds-phi"
+        hint: "bcrypt.hash(pw, < 10) atau MD5/SHA1 untuk password PHI"
+    frameworks: ["fhir", "hapi-fhir", "hl7", "dicom", "epic", "cerner", "smart-on-fhir"]
+    skip_for: ["command-injection"]
+
+  fintech:
+    cwe_focus:
+      - "CWE-362: Concurrent Execution using Shared Resource"
+      - "CWE-20: Improper Input Validation"
+      - "CWE-294: Authentication Bypass by Capture-Replay"
+      - "CWE-778: Insufficient Logging"
+      - "CWE-682: Incorrect Calculation"
+      - "CWE-285: Improper Authorization"
+    threats:
+      - "Non-atomic balance update (double-spend / race condition)"
+      - "Withdrawal tanpa balance check"
+      - "Transfer tanpa idempotency key (replay attack)"
+      - "Financial transaction tanpa audit log"
+      - "One-sided ledger entry (debit tanpa credit)"
+      - "KYC bypass untuk transaksi nilai besar"
+    rule_outlines:
+      - id_skeleton: "fintech-custom-...-non-atomic-balance"
+        hint: "balance -= amount; account.save() tanpa transaction/row lock"
+      - id_skeleton: "fintech-custom-...-no-replay-key"
+        hint: "$app.post('/transfer', handler) tanpa idempotency middleware"
+      - id_skeleton: "fintech-custom-...-ledger-one-sided"
+        hint: "from.balance -= amount tanpa corresponding to.balance += amount"
+      - id_skeleton: "fintech-custom-...-kyc-bypass-amount"
+        hint: "if amount > 10000: transfer() tanpa kyc_status check"
+      - id_skeleton: "fintech-custom-...-no-audit-trail"
+        hint: "endpoint /transfer/withdraw/deposit tanpa logger.info call"
+    frameworks: ["plaid", "open-banking", "dwolla", "coinbase", "alpaca", "ibkr"]
+    skip_for: []
 
   blog:
-    # Rasional domain (naskah R2.2 + T3):
-    #   Kategori McConnell: Internet/Business (hybrid)
-    #   Fokus mitigasi: Stored XSS, file upload, CSP headers, sanitasi input
-    #     konten publik
-    #   Justifikasi terpilih: representasi domain content-driven
-    #
-    # v9.5 (perluasan coverage OWASP Top 10:2021):
-    #   4 CWE lama + 4 CWE baru = 8 CWE total
-    #   Tambahan: CSRF (A01), missing auth (A01), rate limit (A04),
-    #   error exposure (A05)
-    #
-    # v9.6 (sinkron 6 job blog di job_reasoning_node):
-    #   +3 CWE untuk align dengan job baru:
-    #     - multer tanpa fileFilter (CWE-434) — hint ditajamkan
-    #     - JWT short/hardcoded secret (CWE-798)
-    #     - JWT alg=none (CWE-327)
-    #   Total CWE: 9 → 11
     cwe_focus:
-      # === Original 4 CWE (v9.4) ===
       - "CWE-1021: Improper Restriction of Rendered UI Layers"
       - "CWE-79: Cross-site Scripting"
       - "CWE-601: URL Redirection to Untrusted Site"
       - "CWE-434: Unrestricted Upload of File with Dangerous Type"
-      # === Tambahan v9.5 (OWASP Top 10:2021) ===
-      - "CWE-352: Cross-Site Request Forgery"
-      - "CWE-862: Missing Authorization"
-      - "CWE-770: Allocation of Resources Without Limits or Throttling"
-      - "CWE-209: Information Exposure Through Error Message"
-      # === Tambahan v9.5 (BOLA di post/comment edit, dirapikan) ===
-      - "CWE-639: Authorization Bypass Through User-Controlled Key"
-      # === Tambahan v9.6 (sinkron 3 job baru blog) ===
-      - "CWE-798: Use of Hard-coded Credentials"  # JWT secret literal
-      - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"  # alg=none
     threats:
-      - "Missing Content-Security-Policy header (calzavara2020csp)"
-      - "XSS via innerHTML/dangerouslySetInnerHTML di comment/post (gupta2017xss)"
+      - "Missing Content-Security-Policy header"
+      - "XSS via innerHTML/dangerouslySetInnerHTML di comment/post"
       - "Open redirect (res.redirect(req.query.next))"
       - "File upload tanpa ext/MIME validation (web shell)"
       - "Markdown rendering tanpa sanitization (javascript: link, onerror img)"
-      - "IDOR post/comment edit (CWE-639)"
-      - "CSRF form submit komentar/post tanpa token (CWE-352) — OWASP A01:2021"
-      - "Comment/post edit endpoint tanpa ownership check (CWE-862) — OWASP A01:2021"
-      - "Spam komentar — no rate limit (CWE-770) — OWASP A04:2021"
-      - "Stack trace exposed di 500 page (CWE-209) — OWASP A05:2021"
-      # === Tambahan v9.6 (sinkron 3 job baru blog) ===
-      - "Multer upload tanpa fileFilter / limits.fileSize → RCE via polyglot, DoS (CWE-434)"
-      - "JWT signed dengan hardcoded/short secret (CWE-798)"
-      - "JWT verify menerima alg=none — algorithm confusion (CWE-327, CVE-2015-9235)"
     rule_outlines:
       - id_skeleton: "blog-custom-...-innerHTML-comment"
         hint: "el.innerHTML = req.body.comment/post tanpa DOMPurify"
@@ -204,48 +133,11 @@ domains:
         hint: "req.files.image.mv(path) tanpa path.extname in allowed check"
       - id_skeleton: "blog-custom-...-csp-header-missing"
         hint: "route handler tanpa helmet() atau res.setHeader('Content-Security-Policy', ...)"
-      - id_skeleton: "blog-custom-...-idor-post-edit"
-        hint: "Post.update({...req.body}, {where: {id: req.params.id}}) tanpa ownership check"
-      - id_skeleton: "blog-custom-...-csrf-comment-form"
-        hint: "form action='/comments' method='POST' tanpa CSRF token input"
-      - id_skeleton: "blog-custom-...-comment-rate-limit-missing"
-        hint: "POST /comments/:postId tanpa express-rate-limit middleware"
-      - id_skeleton: "blog-custom-...-stack-trace-leak"
-        hint: "res.status(500).send(err.stack) atau error handler expose internal info"
-      - id_skeleton: "blog-custom-...-admin-no-auth"
-        hint: "router.post('/admin/posts', handler) tanpa requireAdmin/requireAuth middleware"
-      # === Tambahan v9.6 (sinkron 3 job baru blog) ===
-      - id_skeleton: "blog-custom-...-multer-no-filefilter"
-        hint: "multer({ dest: 'uploads/' }) atau multer({ storage }) tanpa fileFilter callback + limits.fileSize"
-      - id_skeleton: "blog-custom-...-jwt-short-hardcoded-secret"
-        hint: "jwt.sign(payload, 'literal-string') atau process.env.JWT_SECRET yang dipakai dengan secret < 32 char"
-      - id_skeleton: "blog-custom-...-jwt-alg-none"
-        hint: "jwt.verify(token, secret, { algorithms: ['none'] }) atau jsonwebtoken dengan secretOrPublicKey kosong"
     frameworks: ["marked", "markdown-it", "showdown", "dompurify", "sanitize-html", "ghost", "hexo", "jekyll"]
-    # naskah B5 + R5: skip job keamanan yang tidak relevan untuk blog
-    # (container-scan, idor-rule, ssrf, jwt, rate-limit) — sudah di-handle
-    # di scan_directives._DOMAIN_SKIP_JOBS
-    skip_for: ["idor-tier3", "ssrf", "jwt", "rate-limiting", "healthcare", "fintech", "education"]
+    skip_for: ["idor", "ssrf", "jwt", "rate-limiting"]
 
   iot:
-    # Rasional domain (naskah R2.2 + T3):
-    #   Kategori McConnell: Internet/Business (hybrid)
-    #   Fokus mitigasi: protokol M2M (MQTT/CoAP), firmware credentials,
-    #     device authentication
-    #   Justifikasi terpilih: representasi domain device-centric
-    #
-    # v9.5 (perluasan coverage OWASP IoT Top 10 + CWE VIEW 1357):
-    #   8 CWE lama + 4 CWE baru = 12 CWE total
-    #   Tambahan: command injection (I3), OOB write/read (I3),
-    #   improper input validation (root cause)
-    #
-    # v9.6 (sinkron 6 job iot di job_reasoning_node):
-    #   +2 CWE untuk align dengan job baru:
-    #     - telemetry PII/credential in payload (CWE-200) — varian CWE-359
-    #     - long-lived static token (CWE-798) — sudah ada, hint diturunkan
-    #   Total CWE: 12 → 13
     cwe_focus:
-      # === Original 8 CWE (v9.4) ===
       - "CWE-319: Cleartext Transmission of Sensitive Information"
       - "CWE-798: Use of Hard-coded Credentials"
       - "CWE-295: Improper Certificate Validation"
@@ -254,30 +146,15 @@ domains:
       - "CWE-287: Improper Authentication"
       - "CWE-668: Exposure of Resource to Wrong Sphere"
       - "CWE-494: Download of Code Without Integrity Check"
-      # === Tambahan v9.5 (OWASP IoT Top 10 + CWE VIEW 1357) ===
-      - "CWE-78: Improper Neutralization of Special Elements used in an OS Command (OS Command Injection)"
-      - "CWE-787: Out-of-bounds Write"
-      - "CWE-125: Out-of-bounds Read"
-      - "CWE-20: Improper Input Validation"
-      # === Tambahan v9.6 (sinkron 3 job baru iot) ===
-      - "CWE-200: Information Exposure"  # PII in telemetry payload, hardcoded long-lived token
     threats:
-      - "MQTT broker connection over cleartext (mqtt://) — OWASP IoT I3"
-      - "Default MQTT credentials (admin/admin, device/1234) — OWASP IoT I1"
-      - "TLS dengan cert verification disabled (MITM risk) — OWASP IoT I2"
+      - "MQTT broker connection over cleartext (mqtt://)"
+      - "Default MQTT credentials (admin/admin, device/1234)"
+      - "TLS dengan cert verification disabled (MITM risk)"
       - "Firmware path traversal (user-controlled file path)"
       - "Telemetry data tanpa encryption"
       - "Device auth bypass (device_id sebagai satu-satunya credential)"
       - "MQTT broker exposed di 0.0.0.0:1883"
-      - "Firmware update over HTTP tanpa signature check — OWASP IoT I10"
-      - "OS command injection via sensor input / MQTT payload (CWE-78) — OWASP IoT I3"
-      - "Buffer overflow di C/C++ sensor/protocol parser (CWE-787) — OWASP IoT I3"
-      - "Out-of-bounds read di parser firmware (CWE-125) — OWASP IoT I3"
-      - "Improper input validation sebagai root cause banyak IoT bug (CWE-20)"
-      # === Tambahan v9.6 (sinkron 3 job baru iot) ===
-      - "Telemetry payload publish ke port cleartext 1883 atau bawa field PII/credential (CWE-200, CWE-319)"
-      - "child_process.exec / os.system dengan template interpolation user input → command injection (CWE-78) — hint ditajamkan"
-      - "Long-lived static API token / hardcoded PEM private key di source (CWE-798, CWE-200)"
+      - "Firmware update over HTTP tanpa signature check"
     rule_outlines:
       - id_skeleton: "iot-custom-...-mqtt-cleartext"
         hint: "client.connect('mqtt://...') atau mqtt.Client().connect('mqtt://...')"
@@ -289,22 +166,35 @@ domains:
         hint: "client.tls_insecure_set(True) atau cert_reqs=ssl.CERT_NONE"
       - id_skeleton: "iot-custom-...-firmware-http-download"
         hint: "requests.get('http://.../firmware/...') atau fetch('http://...update.bin')"
-      - id_skeleton: "iot-custom-...-debug-interface-exposed"
-        hint: "JTAG/UART/serial interface enabled di production firmware"
-      - id_skeleton: "iot-custom-...-os-command-injection"
-        hint: "os.system(sensorData) atau exec(mqttPayload) di firmware/edge code"
-      - id_skeleton: "iot-custom-...-buffer-overflow-parser"
-        hint: "memcpy(dst, src, len) atau strcpy di C/C++ sensor/protocol parser tanpa bounds check"
-      - id_skeleton: "iot-custom-...-out-of-bounds-read"
-        hint: "arr[i] tanpa validasi i < len(arr) di C/C++ firmware code"
-      - id_skeleton: "iot-custom-...-no-input-validation"
-        hint: "parseSensorData(data) tanpa validasi tipe/range sensor value"
-      # === Tambahan v9.6 (sinkron 3 job baru iot) ===
-      - id_skeleton: "iot-custom-...-telemetry-pii-payload"
-        hint: "client.publish('telemetry', JSON.stringify({ssn, nik, phone, email, password, token})) atau publish ke host:1883"
-      - id_skeleton: "iot-custom-...-device-cmd-interpolation"
-        hint: "child_process.exec(`command ${req.body.cmd}`) atau os.system(firmwarePath) atau subprocess shell=True"
-      - id_skeleton: "iot-custom-...-static-token-or-pem-key"
-        hint: "PEM '-----BEGIN ... PRIVATE KEY-----' literal di source, atau string >= 40 char alfanumerik sebagai token/kunci"
     frameworks: ["mqtt", "paho-mqtt", "amqp", "coap", "modbus", "azure-iot", "aws-iot"]
-    skip_for: ["healthcare", "fintech", "education"]
+    skip_for: []
+
+  education:
+    cwe_focus:
+      - "CWE-639: Authorization Bypass Through User-Controlled Key"
+      - "CWE-285: Improper Authorization"
+      - "CWE-200: Exposure of Sensitive Information"
+      - "CWE-352: Cross-Site Request Forgery"
+      - "CWE-613: Insufficient Session Expiration"
+      - "CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes"
+    threats:
+      - "Student PII di logs"
+      - "BOLA submission (satu student akses submission student lain)"
+      - "Grade tampering dari request body"
+      - "Quiz endpoint tanpa auth (cheating bypass)"
+      - "Enrollment endpoint tanpa auth"
+      - "Mass assignment (Student.update(req.body) → ubah role/enrollment status)"
+    rule_outlines:
+      - id_skeleton: "education-custom-...-bola-submission"
+        hint: "route '/submissions/:id' atau '/grades/:id' tanpa ownership check"
+      - id_skeleton: "education-custom-...-grade-tampering"
+        hint: "grade = req.body.grade atau score = req.body.score tanpa server validation"
+      - id_skeleton: "education-custom-...-no-auth-quiz"
+        hint: "app.post('/api/quiz/submit', handler) tanpa authRequired middleware"
+      - id_skeleton: "education-custom-...-student-pii-log"
+        hint: "console.log/logger.info(...studentName/NIS/email...)"
+      - id_skeleton: "education-custom-...-enrollment-no-auth"
+        hint: "app.post('/enroll', handler) atau app.post('/api/enrollments', handler) tanpa auth"
+    frameworks: ["moodle-sdk", "scorm", "canvas-lms", "blackboard", "edmodo", "edx", "sakai"]
+    skip_for: ["ssrf", "rate-limiting"]
+
