@@ -1689,7 +1689,10 @@ func (h *PipelineHandler) Generate(c *gin.Context) {
 	}
 
 	aiReq := services.GenerateRequest{
-		RepositoryID:         repoID.String(),
+		// AI service uses 'repository_id' as the GitHub repo identifier
+		// (e.g. 'owner/repo'). Passing the UUID here would cause
+		// GitHub API calls to 404 ('repos/<uuid>'). Use FullName.
+		RepositoryID:         repoFull.FullName,
 		RepositoryFullName:   repoFull.FullName,
 		GitHubToken:          githubToken,
 		ProjectID:            projectIDStr,
