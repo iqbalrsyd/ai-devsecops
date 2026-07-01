@@ -4,8 +4,8 @@ set -e
 echo "=== Fix Cert: Diagnose & Repair ==="
 
 CERT_HOST_PATH="/etc/letsencrypt/live/app.iqbalhidayatrasyad.blog"
-CERT_DEST_LINK="/opt/ai-devsecops/nginx/certs/app.iqbalhidayatrasyad.blog"
-LE_DEST_LINK="/opt/ai-devsecops/nginx/letsencrypt/app.iqbalhidayatrasyad.blog"
+CERT_DEST="/opt/ai-devsecops/nginx/certs/app.iqbalhidayatrasyad.blog"
+LE_DEST="/opt/ai-devsecops/nginx/letsencrypt/app.iqbalhidayatrasyad.blog"
 
 echo ""
 echo "[1/5] Check if cert files exist on host..."
@@ -24,12 +24,12 @@ fi
 
 echo ""
 echo "[2/5] Recreate symlinks to cert files..."
-sudo rm -f /opt/ai-devsecops/nginx/certs
-sudo rm -f /opt/ai-devsecops/nginx/letsencrypt
+sudo rm -f "$CERT_DEST"
+sudo rm -f "$LE_DEST"
 sudo mkdir -p /opt/ai-devsecops/nginx/certs
 sudo mkdir -p /opt/ai-devsecops/nginx/letsencrypt
-sudo ln -sfn "$CERT_HOST_PATH" /opt/ai-devsecops/nginx/certs/app.iqbalhidayatrasyad.blog
-sudo ln -sfn "$CERT_HOST_PATH" /opt/ai-devsecops/nginx/letsencrypt/app.iqbalhidayatrasyad.blog
+sudo ln -sfn "$CERT_HOST_PATH" "$CERT_DEST"
+sudo ln -sfn "$CERT_HOST_PATH" "$LE_DEST"
 echo "  OK - symlinks recreated"
 ls -la /opt/ai-devsecops/nginx/certs/
 ls -la /opt/ai-devsecops/nginx/letsencrypt/
