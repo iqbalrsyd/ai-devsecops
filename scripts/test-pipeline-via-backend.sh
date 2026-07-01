@@ -55,6 +55,10 @@ echo ""
 echo "[1/5] Login as $USER_EMAIL..."
 echo "  (testing nginx -> backend connectivity)..."
 
+# Test 0: RAM check
+echo "  RAM available: $(free -m | awk 'NR==2{printf \"%.0f MB\", $7}')"
+echo ""
+
 # Test 1: Is nginx listening?
 if ! curl -sI --max-time 5 http://localhost 2>&1 | head -1 | grep -q "301\|200\|308"; then
     echo "  ERROR: nginx not responding on http://localhost"
@@ -70,8 +74,17 @@ if ! curl -sIk --max-time 5 https://localhost 2>&1 | head -1 | grep -q "200\|301
     exit 1
 fi
 
+# Test 2.5: Is backend reachable from nginx container directly? (bypass HTTPS)
+echo "  Test: backend reachable from nginx container (direct)?"
+DIRECT_RESP=$(docker run --rm --network ai-devsecops_appnet curlimages/curl:latest \
+    --max-time 10 -s -X POST http://backend:8080/api/v1/auth/login \
+    -H "Content-Type: application/json" \
+    -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$LOGIN_PASS\"}" 2>&1 | head -c 300)
+echo "  Direct (bypass nginx): $DIRECT_RESP"
+echo ""
+
 # Test 3: Direct login (HTTPS via nginx)
-echo "  Calling POST /api/v1/auth/login..."
+echo "  Calling POST https://localhost/api/v1/auth/login..."
 LOGIN=$(curl -sL --max-time 30 -X POST https://localhost/api/v1/auth/login \
     -H "Content-Type: application/json" \
     -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$LOGIN_PASS\"}" 2>&1)
