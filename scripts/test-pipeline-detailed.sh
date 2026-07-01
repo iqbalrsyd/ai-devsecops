@@ -18,7 +18,7 @@ RESP=$(docker run --rm --network ai-devsecops_appnet curlimages/curl:latest \
     --max-time 300 \
     -s -X POST http://ai-service:8000/api/pipeline/generate \
     -H "Content-Type: application/json" \
-    -d '{"repository_full_name":"octocat/Hello-World","github_token":"","query":"basic CI","language":"python","framework":"","deploy_target":"docker","project_type":"api","security_requirements":[]}' 2>&1)
+    -d '{"repository_id":"octocat/Hello-World","repository_full_name":"octocat/Hello-World","github_token":"","query":"basic CI","language":"python","framework":"","deploy_target":"docker","project_type":"api","security_requirements":[]}' 2>&1)
 
 echo "Response size: $(echo -n "$RESP" | wc -c) bytes"
 echo ""
