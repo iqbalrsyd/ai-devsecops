@@ -121,8 +121,10 @@ LOG_BEFORE_BACKEND=$(docker logs ai-devsecops-backend-1 --tail=0 2>&1 | wc -l)
 # Trigger pipeline
 echo ""
 echo "[2/5] Triggering pipeline generation (timeout 300s)..."
-RESP=$(curl -s --max-time 300 -X POST \
-    "http://localhost/api/v1/repositories/$REPO_ID/pipelines/generate" \
+# Use direct backend call (bypass nginx) for reliability
+RESP=$(docker run --rm --network ai-devsecops_appnet curlimages/curl:latest \
+    --max-time 300 -s -X POST \
+    "http://backend:8080/api/v1/repositories/$REPO_ID/pipelines/generate" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $TOKEN" \
     -d '{
