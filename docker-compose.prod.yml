@@ -86,8 +86,8 @@ services:
       - "443:443"
     volumes:
       - ./nginx/prod-nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/certs:/etc/letsencrypt/live/app.iqbalhidayatrasyad.blog:ro
-      - ./nginx/letsencrypt:/var/www/certbot:ro
+      - /etc/letsencrypt/live/app.iqbalhidayatrasyad.blog:/etc/letsencrypt/live/app.iqbalhidayatrasyad.blog:ro
+      - /var/www/certbot:/var/www/certbot:ro
     depends_on:
       - backend
       - frontend
