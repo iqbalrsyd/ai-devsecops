@@ -13,10 +13,10 @@ LOG_BEFORE=$(docker logs ai-devsecops-ai-service-1 --tail=0 2>&1 | wc -l)
 
 # Call pipeline/generate (long timeout for 18+ LLM calls)
 echo ""
-echo "[1/4] Calling /pipeline/generate (timeout 300s)..."
+echo "[1/4] Calling /api/pipeline/generate (timeout 300s)..."
 RESP=$(docker run --rm --network ai-devsecops_appnet curlimages/curl:latest \
     --max-time 300 \
-    -s -X POST http://ai-service:8000/pipeline/generate \
+    -s -X POST http://ai-service:8000/api/pipeline/generate \
     -H "Content-Type: application/json" \
     -d '{"repository_full_name":"octocat/Hello-World","github_token":"","query":"basic CI","language":"python","framework":"","deploy_target":"docker","project_type":"api","security_requirements":[]}' 2>&1)
 
