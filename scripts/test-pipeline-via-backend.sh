@@ -53,13 +53,41 @@ echo "Test repo: $REPO_ID"
 # Login to get JWT
 echo ""
 echo "[1/5] Login as $USER_EMAIL..."
-LOGIN=$(curl -s --max-time 30 -X POST http://localhost/api/v1/auth/login \
+echo "  (testing nginx -> backend connectivity)..."
+
+# Test 1: Is nginx listening?
+if ! curl -sI --max-time 5 http://localhost 2>&1 | head -1 | grep -q "301\|200\|308"; then
+    echo "  ERROR: nginx not responding on http://localhost"
+    echo "  Check: docker ps | grep nginx"
+    exit 1
+fi
+
+# Test 2: Is HTTPS working?
+if ! curl -sIk --max-time 5 https://localhost 2>&1 | head -1 | grep -q "200\|301\|308"; then
+    echo "  ERROR: nginx not responding on https://localhost"
+    echo "  Last 5 nginx log:"
+    docker logs ai-devsecops-nginx-1 --tail=5
+    exit 1
+fi
+
+# Test 3: Direct login (HTTPS via nginx)
+echo "  Calling POST /api/v1/auth/login..."
+LOGIN=$(curl -sL --max-time 30 -X POST https://localhost/api/v1/auth/login \
     -H "Content-Type: application/json" \
-    -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$LOGIN_PASS\"}")
+    -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$LOGIN_PASS\"}" 2>&1)
+echo "  Raw response (first 200 chars):"
+echo "$LOGIN" | head -c 200
+echo ""
 TOKEN=$(echo "$LOGIN" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('access_token',''))" 2>/dev/null)
 if [ -z "$TOKEN" ]; then
-    echo "  ERROR: Login failed. Response:"
+    echo "  ERROR: Login failed. Full response:"
     echo "$LOGIN"
+    echo ""
+    echo "  Backend log:"
+    docker logs ai-devsecops-backend-1 --tail=10
+    echo ""
+    echo "  Nginx log:"
+    docker logs ai-devsecops-nginx-1 --tail=5
     exit 1
 fi
 echo "  Token: ${TOKEN:0:20}..."
