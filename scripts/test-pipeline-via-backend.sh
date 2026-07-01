@@ -53,7 +53,7 @@ echo "Test repo: $REPO_ID"
 # Login to get JWT
 echo ""
 echo "[1/5] Login as $USER_EMAIL..."
-LOGIN=$(curl -s -X POST http://localhost/api/v1/auth/login \
+LOGIN=$(curl -s --max-time 30 -X POST http://localhost/api/v1/auth/login \
     -H "Content-Type: application/json" \
     -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$LOGIN_PASS\"}")
 TOKEN=$(echo "$LOGIN" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('access_token',''))" 2>/dev/null)
