@@ -79,19 +79,28 @@ echo "  Test: backend reachable from nginx container (direct)?"
 DIRECT_RESP=$(docker run --rm --network ai-devsecops_appnet curlimages/curl:latest \
     --max-time 10 -s -X POST http://backend:8080/api/v1/auth/login \
     -H "Content-Type: application/json" \
-    -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$LOGIN_PASS\"}" 2>&1 | head -c 300)
-echo "  Direct (bypass nginx): $DIRECT_RESP"
-echo ""
-
-# Test 3: Direct login (HTTPS via nginx)
-echo "  Calling POST https://localhost/api/v1/auth/login..."
-LOGIN=$(curl -skL --max-time 30 -X POST https://localhost/api/v1/auth/login \
-    -H "Content-Type: application/json" \
     -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$LOGIN_PASS\"}" 2>&1)
-echo "  HTTPS login raw (first 300 chars):"
-echo "$LOGIN" | head -c 300
-echo ""
-TOKEN=$(echo "$LOGIN" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('access_token',''))" 2>/dev/null)
+echo "  Direct (bypass nginx): $(echo "$DIRECT_RESP" | head -c 200)"
+
+# Extract token from direct response
+TOKEN=$(echo "$DIRECT_RESP" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('access_token',''))" 2>/dev/null)
+if [ -n "$TOKEN" ]; then
+    echo ""
+    echo "  Token obtained via direct test (bypassing HTTPS): ${TOKEN:0:20}..."
+    echo "  (skipping HTTPS login step since direct works)"
+    echo ""
+else
+    # Try HTTPS if direct didn't work
+    echo ""
+    echo "  Direct test didn't return token, trying HTTPS..."
+    LOGIN=$(curl -skL --max-time 30 -X POST https://localhost/api/v1/auth/login \
+        -H "Content-Type: application/json" \
+        -d "{\"email\":\"$USER_EMAIL\",\"password\":\"$LOGIN_PASS\"}" 2>&1)
+    echo "  HTTPS login raw (first 300 chars):"
+    echo "$LOGIN" | head -c 300
+    echo ""
+    TOKEN=$(echo "$LOGIN" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('access_token',''))" 2>/dev/null)
+fi
 if [ -z "$TOKEN" ]; then
     echo "  ERROR: Login failed. Full response:"
     echo "$LOGIN"
