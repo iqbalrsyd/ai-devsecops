@@ -34,7 +34,6 @@ services:
   backend:
     build:
       context: ./backend
-      target: builder
     env_file:
       - .env
     environment:
