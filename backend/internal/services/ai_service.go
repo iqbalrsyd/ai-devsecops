@@ -69,7 +69,7 @@ func (s *AIService) Generate(req GenerateRequest) (*GenerateResponse, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", s.baseURL+"/pipeline/generate", bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", s.baseURL+"/api/pipeline/generate", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -119,7 +119,7 @@ func (s *AIService) AnalyzeRepository(req AnalyzeRequest) (*AnalyzeResponse, err
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", s.baseURL+"/pipeline/repo/analyze", bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", s.baseURL+"/api/pipeline/repo/analyze", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -171,7 +171,7 @@ func (s *AIService) Deploy(req DeployRequest) (*DeployResponse, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", s.baseURL+"/pipeline/deploy", bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", s.baseURL+"/api/pipeline/deploy", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -221,7 +221,7 @@ func (s *AIService) Validate(req ValidateRequest) (*ValidateResponse, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", s.baseURL+"/pipeline/validate", bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", s.baseURL+"/api/pipeline/validate", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -272,7 +272,7 @@ func (s *AIService) AnalyzeExecution(repoID string, runID int, token string) (*P
 		"github_token":  token,
 	})
 
-	httpReq, err := http.NewRequest("POST", fmt.Sprintf("%s/pipeline/analyze/%d", s.baseURL, runID), bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", fmt.Sprintf("%s/api/pipeline/analyze/%d", s.baseURL, runID), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
