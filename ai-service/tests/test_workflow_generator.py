@@ -1451,6 +1451,99 @@ def test_owasp_3dim_risk_assessor_drops_non_security():
     assert level in ("high", "critical")
 
 
+def test_cvss_driven_jobs_always_emitted_even_when_domain_is_general():
+    """K2.4: CVSS-driven jobs must always reach the workflow YAML.
+
+    Even when domain is "general" and domain_confidence is low, the
+    `_skip_custom_jobs` flag must NOT drop `cvss_driven_jobs`. This is
+    the contract that keeps the 2-file split (generic + custom)
+    meaningful for repos that the domain classifier marks as general.
+    """
+    state = _minimal_state()
+    state["detected_domain"] = "general"
+    state["domain_confidence"] = 0.3
+    state["general_only"] = True
+    state["cvss_driven_jobs"] = [
+        {
+            "name": "auth-go-credential-exposure",
+            "coverage": "auth-credential-exposure",
+            "reasoning": (
+                "Top finding internal/auth/session.go:42 CVSS=8.6 shows "
+                "hard-coded WhatsApp session token. Standard job `sast` "
+                "does not cover this because Semgrep community rules do "
+                "not flag session-id string literals. This job adds a "
+                "shell grep that catches high-entropy token assignments."
+            ),
+            "cvss_justified_by": {
+                "file": "internal/auth/session.go",
+                "line": 42,
+                "cvss": 8.6,
+                "cve_or_rule": "CWE-798",
+            },
+            "actions": [
+                {"type": "shell_check", "name": "scan-tokens",
+                 "script": "grep -rE 'session[_]?id\\s*=\\s*\"[A-Za-z0-9]{20,}\"' . || true"},
+                {"type": "sarif_upload", "category": "auth-credential-exposure"},
+            ],
+            "configuration": {"continue_on_error": True, "timeout_minutes": 10},
+        },
+    ]
+
+    yaml_text, stages, explanations = _build_workflow_yaml(
+        primary_language="go",
+        package_manager="go mod",
+        test_framework="go test",
+        frameworks=[],
+        build_tools=["go"],
+        stages=["lint", "test", "sast", "secret-scan", "dependency-scan"],
+        arch_type="monolithic",
+        findings=[],
+        state=state,
+    )
+
+    assert "auth-go-credential-exposure" in stages, (
+        f"CVSS job must be emitted even when domain=general/confidence=0.3. "
+        f"Got stages: {stages}"
+    )
+    assert "auth-go-credential-exposure" in yaml_text
+    cvss_expl = [e for e in explanations if e.get("name") == "auth-go-credential-exposure"]
+    assert cvss_expl and cvss_expl[0].get("status") == "cvss_driven", (
+        f"Explanation must mark the job as cvss_driven. Got: {cvss_expl}"
+    )
+
+
+def test_cvss_driven_jobs_route_to_custom_file_in_split():
+    """K2.4: CVSS-driven jobs must end up in the custom (reusable)
+    workflow file — not the generic one — so the FE shows 2 tabs.
+    """
+    from app.agents.nodes.workflow_generator import _split_workflow_yaml
+    merged = """
+name: CI
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo lint
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo sast
+  auth-go-credential-exposure:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo cvss
+"""
+    generic_yaml, custom_yaml, file_meta = _split_workflow_yaml(
+        merged, custom_filename="ai-devsecops-custom.yml", detected_domain="general",
+    )
+    assert custom_yaml, "Custom file must not be empty when a CVSS job exists"
+    assert "auth-go-credential-exposure" in custom_yaml
+    assert "auth-go-credential-exposure" not in generic_yaml
+    kinds = {f["kind"] for f in file_meta}
+    assert kinds == {"generic", "custom"}, f"Expected 2 files (generic+custom), got {kinds}"
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

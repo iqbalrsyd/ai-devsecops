@@ -5183,8 +5183,29 @@ def _build_workflow_yaml(
     #      misclassified as e-commerce).
     # The standard jobs above (lint, test, sast, secret-scan,
     # dependency-scan, container-scan) are still emitted.
-    _skip_custom_jobs = bool(_state.get("general_only")) or (
-        (domain_confidence or 0.0) < 0.5
+    # K2.4: CVSS-driven jobs (from cvss_driven_job_generation_node) are
+    # ALWAYS emitted into the workflow. They target specific high-CVSS
+    # findings and are the only way the 2-file split (generic + custom)
+    # survives when domain_confidence is low / domain is "general".
+    # Without these, every job ends up in GENERIC_STAGE_NAMES and the
+    # custom file is empty — which the FE shows as a single-file view.
+    cvss_driven_jobs = _state.get("cvss_driven_jobs") or []
+    for cvss_job in cvss_driven_jobs:
+        if not isinstance(cvss_job, dict):
+            continue
+        cvss_name = cvss_job.get("name", "").strip()
+        if not cvss_name:
+            continue
+        if cvss_name in stage_names:
+            continue
+        body, reason = _build_ai_job_from_design(cvss_job, state=state)
+        if not body:
+            continue
+        _add_job(cvss_name, body, reason, status="cvss_driven")
+        yaml_lines.append("")
+
+    _skip_custom_jobs = bool(_state.get("general_only")) and not cvss_driven_jobs or (
+        (domain_confidence or 0.0) < 0.5 and not cvss_driven_jobs
     )
     for design in (_state.get("job_designs") or []) if not _skip_custom_jobs else []:
         if not isinstance(design, dict):
