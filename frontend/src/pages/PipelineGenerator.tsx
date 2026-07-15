@@ -256,8 +256,13 @@ export default function PipelineGenerator() {
 
   const handleGenerate = async (query: string, options: { language: string; framework: string; deployTarget: string; projectType: string; securityReqs: string[]; pipelineMode: "general" | "domain" | "both" }) => {
     const repoFullName = selectedRepo?.full_name || ""
+    const repoIdForBackend = selectedRepo?.id || ""
     if (!repoFullName) {
       setGenerationError("No repository is connected to this project yet.")
+      return
+    }
+    if (!repoIdForBackend) {
+      setGenerationError("Repository id is missing. Reconnect the repository and try again.")
       return
     }
     setGenerationError(null)
@@ -274,9 +279,16 @@ export default function PipelineGenerator() {
       // collapses to "Language: Unknown, 0 stages".
       const cachedToken =
         (typeof window !== "undefined" && localStorage.getItem("github_token")) || ""
+      // The Go backend route is `/repositories/:repoId/pipelines/generate`
+      // where `:repoId` is the **DB UUID** (`repositories.id`). The backend
+      // looks up the row, derives the GitHub `owner/repo` slug from
+      // `repositories.full_name`, and forwards that to the AI service.
+      // Passing `full_name` here produces a URL like
+      // `/api/v1/repositories/owner/repo/pipelines/generate` which Gin
+      // cannot match (it returns 404) because `repoId` is not a UUID.
       const result = await generatePipeline.mutateAsync({
         query,
-        repository_id: repoFullName,
+        repository_id: repoIdForBackend,
         project_id: projectId || "",
         project_type: options.projectType,
         language: options.language,

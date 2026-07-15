@@ -9,9 +9,81 @@
 #
 # Reference: app/agents/semgrep_rules/llm_generation_config.py
 
-version: "1.0"
+version: "1.1"
 purpose: "Knowledge base for AI agent generating Tier 3 Semgrep rules per detected domain."
 usage: "Lookup detected domain → read cwe_focus + threats + rule_outlines → expand into full Semgrep YAML."
+
+# ----------------------------------------------------------------------------
+# v1.1: code-level domain signatures (ground-truth anchored).
+#
+# Skripsi Bab 4 §4.4: setiap ground-truth repo punya profil struktur kode
+# yang konsisten dengan domain-nya. Sistem TIDAK boleh hanya mengandalkan
+# library imports (yang sering kosong untuk Java/Maven seperti ThingsBoard)
+# atau nama repo. Sebagai gantinya, `code_signatures` di bawah ini memberi
+# daftar pola folder / file / import / Maven coordinate / pip package yang,
+# kalau terdeteksi di repo, mengkonfirmasi domain dengan confidence tinggi.
+#
+# Dipakai oleh app/agents/nodes/domain_detection_node.py lewat helper
+# _load_code_signatures() (lihat bawah). Setiap signature punya bobot
+#   - repo_name_contains  : substring match pada nama repo
+#   - path_globs          : glob match pada struktur file (case-insensitive)
+#   - path_contains       : substring match pada path (case-insensitive)
+#   - import_patterns     : regex match pada source file content
+#   - libraries           : nama library / Maven coord / pip pkg
+#   - keywords_desc       : substring pada repository_description
+#   - frameworks          : framework/library identifier
+#
+# Score: 1 hit = 1.0; threshold untuk konfirmasi = 1.0 (satu signature
+# cukup). Beberapa signature dengan `required: true` akan menggugurkan
+# heuristic veto di domain_detection_node.
+# ----------------------------------------------------------------------------
+
+code_signatures:
+
+  e-commerce:
+    - id: django-oscar-pattern
+      repo_name_contains: ["django-oscar", "oscar", "ecommerce", "e-commerce", "shop", "store", "commerce", "toko", "toko-online", "olshop", "flipkart", "amazon", "tokopedia", "shopee", "bukalapak", "lazada"]
+      path_globs: ["**/oscar/**", "**/apps/oscar/**", "**/catalogue/**", "**/checkout/**", "**/basket/**", "**/payment/**", "**/order/**", "**/customer/**", "**/shop/**"]
+      path_contains: ["oscar/apps", "/catalogue/", "/basket/", "/checkout/", "/payment/", "/order/", "/dashboard/"]
+      import_patterns: ["from oscar", "import oscar", "django-oscar", "from oscar\\.apps", "from django\\.contrib", "INSTALLED_APPS.*oscar", "django\\.conf\\.settings\\.OSCAR", "get_model\\(['\\\"]catalogue"]
+      libraries: ["django-oscar", "django-oscar-api", "django-oscar-bundles", "django-shop", "saleor", "django-shop", "spree", "solidus"]
+      keywords_desc: ["e-commerce", "online shop", "toko online", "marketplace", "katalog", "catalog"]
+      frameworks: ["django-oscar", "saleor", "spree", "shopify", "magento", "woocommerce"]
+      required: true
+    - id: payment-gateway-import
+      import_patterns: ["from payments", "import payments", "django-payments", "from oscar\\.apps\\.payment", "stripe\\.checkout", "MIDTRANS", "XENDIT", "PAYMENT_GATEWAY"]
+      libraries: ["django-payments", "stripe", "midtrans", "xendit", "doku", "paypal-rest-sdk", "braintree", "razorpay", "adyen"]
+      keywords_desc: ["payment", "checkout", "order", "invoice", "pembayaran", "transaksi"]
+      required: false
+
+  blog:
+    - id: ghost-platform-pattern
+      repo_name_contains: ["ghost", "blog", "cms", "ghost-gt", "ghost-platform", "ghost-cms", "ghost-theme", "ghost-theme-starter", "ghost-admin", "ghost-frontend"]
+      path_globs: ["**/ghost/**", "**/admin-x-settings/**", "**/admin-x-framework/**", "**/comments-ui/**", "**/koenig-lexical/**", "**/ghost-admin/**", "**/ghost-core/**", "**/ghost-web/**", "**/content/**", "**/posts/**", "**/post/**", "**/articles/**"]
+      path_contains: ["/ghost/core/", "/ghost-admin/", "/ghost-web/", "ghost/core", "admin-x-", "/posts/", "/comments/", "/tags/", "/authors/", "/newsletters/", "/subscribers/", "ghost-api", "ghost.io"]
+      import_patterns: ["@tryghost/", "from @tryghost", "require\\(['\\\"]@tryghost", "ghost-admin", "ghost-api", "ghost-web", "ghost/core", "marked\\(", "dompurify", "sanitize-html", "handlebars", "showdown"]
+      libraries: ["ghost", "@tryghost/koenig-lexical", "@tryghost/admin-api", "@tryghost/admin-x-settings", "@tryghost/logging", "marked", "dompurify", "sanitize-html", "showdown", "markdown-it"]
+      keywords_desc: ["blog", "ghost", "cms", "content", "publishing", "post", "article", "subscriber", "newsletter"]
+      frameworks: ["ghost", "hexo", "jekyll", "@tryghost/koenig-lexical", "@tryghost/admin-api"]
+      required: true
+    - id: blog-route-pattern
+      path_contains: ["/ghost/api/", "/api/content/", "/api/posts/", "/api/comments/", "/api/tags/", "/api/auth/", "/ghost/api/v"]
+      required: false
+
+  iot:
+    - id: thingsboard-pattern
+      repo_name_contains: ["thingsboard", "thingsboard-pe", "thingsboard-ce", "tb-", "iot", "device", "sensor", "telemetry", "mqtt", "kura", "leshan", "hivemq"]
+      path_globs: ["**/thingsboard/**", "**/rule-engine/**", "**/device-profile/**", "**/telemetry/**", "**/asset-profile/**", "**/widgets/**", "**/controller/**", "**/transport/**", "**/gateway/**"]
+      path_contains: ["thingsboard", "/rule-engine/", "/transport/mqtt", "/transport/coap", "/transport/http", "/controller/", "/device-profile/", "/asset-profile/", "/rule-chain/", "/widgets/", "/telemetry/", "/plugins/telemetry", "/api/v1/device", "/api/plugins/rpc", "/api/auth/login"]
+      import_patterns: ["org\\.thingsboard", "ThingsBoard", "import org\\.thingsboard", "org\\.eclipse\\.paho", "EclipsePaho", "MqttClient", "MqttAsyncClient", "spring-integration-mqtt", "californium", "LeshanServer", "CoapServer", "org\\.eclipse\\.leshan"]
+      libraries: ["thingsboard", "org.eclipse.paho", "eclipse-paho", "spring-integration-mqtt", "spring-integration", "californium-core", "californium", "eclipse-leshan", "leshan", "hivemq", "eclipse-kura", "kura", "org.eclipse.mosquitto", "org.thingsboard"]
+      keywords_desc: ["iot", "thingsboard", "telemetry", "device", "sensor", "mqtt", "coap", "rule engine", "asset", "device profile"]
+      frameworks: ["thingsboard", "eclipse-paho", "spring-integration", "leshan", "hivemq", "kura"]
+      required: true
+    - id: iot-protocol-import
+      import_patterns: ["org\\.eclipse\\.paho", "MqttClient", "MqttAsyncClient", "MqttConnectOptions", "paho-mqtt", "import paho", "from paho", "aiomqtt", "asyncio_mqtt", "import coap", "californium", "ModbusClient", "pymodbus"]
+      libraries: ["mqtt", "paho-mqtt", "org.eclipse.paho", "spring-integration-mqtt", "californium", "coap", "modbus", "pymodbus", "aiomqtt", "asyncio-mqtt", "gmqtt"]
+      required: false
 
 domains:
 

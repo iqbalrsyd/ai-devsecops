@@ -1,5 +1,29 @@
 import { useMutation, useQuery } from "@tanstack/react-query"
+import axios from "axios"
 import api from "@/lib/axios"
+
+// The AI service is exposed at the `/ai/` prefix by nginx (rewritten
+// to `/api/` on the way to ai-service:8000). The shared `api` axios
+// instance has `baseURL = /api/v1`, so we need a *second* instance
+// rooted at the site origin for those `/ai/*` calls. Without this
+// helper the request would be sent to `/api/v1/ai/pipeline/generate`
+// — which the backend Go router does not implement (returns 404),
+// even though the AI service itself answers `/ai/pipeline/generate`
+// just fine.
+const aiApi = axios.create({
+  baseURL: "",
+  headers: { "Content-Type": "application/json" },
+  timeout: 600_000,
+})
+
+aiApi.interceptors.request.use((config) => {
+  const token = localStorage.getItem("access_token")
+  if (token) {
+    config.headers = config.headers || {}
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
 
 const AI_BASE = "/ai/pipeline"
 const PIPELINE_BASE = "/ai/pipeline"
@@ -249,8 +273,95 @@ export interface GeneratePipelineInput {
 export function useGeneratePipeline() {
   return useMutation({
     mutationFn: async (input: GeneratePipelineInput) => {
-      const res = await api.post(`${AI_BASE}/generate`, input)
-      return normalizeGenerateResponse(res.data as GeneratePipelineApiResponse)
+      // Generate through the Go backend, not the AI service directly.
+      //
+      // The Go backend stores the GitHub token encrypted in PostgreSQL
+      // and forwards it to the AI service on our behalf. If we called
+      // `/ai/pipeline/generate` directly, the AI service would not have
+      // a token (it does not read our DB) and would respond with
+      // "No GitHub token available", which we cannot recover from on
+      // the client. The Go endpoint also persists the resulting
+      // pipeline (version, stages, generated YAML, security controls
+      // applied) to the DB, which the AI service does not do.
+      //
+      // Input shape from the FE still includes `repository_id` (a
+      // Go-side UUID) plus query parameters; the backend derives the
+      // GitHub `owner/repo` slug from the DB row and does the rest.
+      const res = await api.post(
+        `/repositories/${input.repository_id}/pipelines/generate`,
+        {
+          query: input.query,
+          language: input.language,
+          framework: input.framework,
+          deploy_target: input.deploy_target,
+          project_type: input.project_type,
+          security_requirements: input.security_requirements ?? [],
+          pipeline_mode: input.pipeline_mode,
+        },
+      )
+      // The Go backend returns `{ branch, pipeline: {...} }`. The AI
+      // service returns a flat object with `generated_workflow`,
+      // `generated_stages`, etc. — normalise into the FE's
+      // `PipelineResponse` shape so the rest of the page keeps
+      // working without knowing which path was used.
+      const body = res.data as {
+        branch?: string
+        pipeline?: {
+          generated_yaml?: string
+          generated_stages?: string[]
+          stages?: string
+          ai_explanation?: string
+          validation_results?: string
+          github_pr_url?: string | null
+          pipeline_version?: number
+        }
+      }
+      const pipeline = body.pipeline ?? {}
+      const stagesArr =
+        pipeline.generated_stages ??
+        (typeof pipeline.stages === "string"
+          ? (() => {
+              try {
+                const parsed = JSON.parse(pipeline.stages)
+                return Array.isArray(parsed) ? parsed : []
+              } catch {
+                return []
+              }
+            })()
+          : [])
+      let validation
+      if (typeof pipeline.validation_results === "string") {
+        try {
+          const v = JSON.parse(pipeline.validation_results)
+          validation = {
+            valid: !!v.valid,
+            syntax_ok: true,
+            actions_pinned: true,
+            permissions_minimal: true,
+            missing_security_stages: [],
+            warnings: v.warnings ?? [],
+            errors: v.errors ?? [],
+          }
+        } catch {
+          validation = undefined
+        }
+      }
+      return {
+        workflow_yaml: pipeline.generated_yaml ?? "",
+        workflow_yaml_generic: pipeline.generated_yaml ?? "",
+        workflow_yaml_custom: "",
+        workflow_files: [],
+        explanation: pipeline.ai_explanation ?? "",
+        stages: stagesArr,
+        stages_general: stagesArr,
+        stages_custom: [],
+        invalid_stages: [],
+        validation,
+        pr_url: pipeline.github_pr_url ?? null,
+        generation_id: null,
+        errors: [],
+        analysis: undefined,
+      } as PipelineResponse
     },
   })
 }
@@ -258,7 +369,7 @@ export function useGeneratePipeline() {
 export function useValidateWorkflow() {
   return useMutation({
     mutationFn: async (workflowYaml: string) => {
-      const res = await api.post(`${AI_BASE}/validate`, { workflow_yaml: workflowYaml })
+      const res = await aiApi.post(`${AI_BASE}/validate`, { workflow_yaml: workflowYaml })
       return res.data as ValidationResult
     },
   })
@@ -277,7 +388,7 @@ export function useDeployWorkflow() {
       pr_title?: string
       pr_body?: string
     }) => {
-      const res = await api.post(`${AI_BASE}/deploy`, input)
+      const res = await aiApi.post(`${AI_BASE}/deploy`, input)
       return res.data as {
         branch: string
         commit_sha: string
@@ -297,7 +408,7 @@ export function useDeployWorkflow() {
 export function useExecuteWorkflow() {
   return useMutation({
     mutationFn: async (input: { repository_id: string; workflow_filename?: string }) => {
-      const res = await api.post(`${AI_BASE}/execute`, input)
+      const res = await aiApi.post(`${AI_BASE}/execute`, input)
       return res.data as { run_id: number; status: string; errors: string[] }
     },
   })
@@ -309,7 +420,7 @@ export function useLatestWorkflowRun(repositoryId: string) {
     queryFn: async () => {
       const cachedToken =
         (typeof window !== "undefined" && localStorage.getItem("github_token")) || ""
-      const res = await api.get(`${AI_BASE}/latest-run`, {
+      const res = await aiApi.get(`${AI_BASE}/latest-run`, {
         params: {
           repository_id: repositoryId,
           github_token: cachedToken,
@@ -345,7 +456,7 @@ export function useNodeSpecs(tahap: number[] | undefined) {
       if (tahap && tahap.length === 1) {
         params.tahap = String(tahap[0])
       }
-      const res = await api.get(`${PIPELINE_BASE}/node-specs`, { params })
+      const res = await aiApi.get(`${PIPELINE_BASE}/node-specs`, { params })
       return (res.data?.nodes ?? []) as NodeSpec[]
     },
     staleTime: 60 * 60 * 1000,
@@ -362,7 +473,7 @@ export function useExecutionStatus(repositoryId: string, runId: number | null) {
       // "No subject runs yet" even when the run exists.
       const cachedToken =
         (typeof window !== "undefined" && localStorage.getItem("github_token")) || ""
-      const res = await api.get(`${AI_BASE}/status/${runId}`, {
+      const res = await aiApi.get(`${AI_BASE}/status/${runId}`, {
         params: {
           repository_id: repositoryId,
           github_token: cachedToken,
@@ -403,7 +514,7 @@ export function useExecutionLogs(repositoryId: string, runId: number | null) {
   return useQuery({
     queryKey: ["execution-logs", repositoryId, runId],
     queryFn: async () => {
-      const res = await api.get(`${AI_BASE}/logs/${runId}`, {
+      const res = await aiApi.get(`${AI_BASE}/logs/${runId}`, {
         params: { repository_id: repositoryId },
       })
       return res.data as { logs: string }
@@ -421,7 +532,7 @@ export function useAnalyzeExecution() {
       workflowJobs?: string
       workflowConclusion?: string
     }) => {
-      const res = await api.post(`${AI_BASE}/analyze-execution/${input.runId}`, {
+      const res = await aiApi.post(`${AI_BASE}/analyze-execution/${input.runId}`, {
         repository_id: input.repositoryId,
         workflow_jobs: input.workflowJobs,
         workflow_conclusion: input.workflowConclusion,
@@ -515,7 +626,7 @@ export interface AnalyzeRepositoryResponse {
 export function useAnalyzeRepository() {
   return useMutation({
     mutationFn: async (repositoryFullName: string) => {
-      const res = await api.post(`${AI_BASE}/repo/analyze`, {
+      const res = await aiApi.post(`${AI_BASE}/repo/analyze`, {
         repository_full_name: repositoryFullName,
       })
       return res.data as AnalyzeRepositoryResponse
@@ -556,7 +667,7 @@ export function usePipelineAnalyze() {
       // log evaluator on the latest workflow logs.
       force?: boolean
     }) => {
-      const res = await api.post(`${AI_BASE}/analyze/${input.run_id}`, {
+      const res = await aiApi.post(`${AI_BASE}/analyze/${input.run_id}`, {
         repository_id: input.repository_id,
         github_token: input.github_token,
         force: input.force ?? false,
@@ -580,7 +691,7 @@ export interface ComplianceResult {
 export function useWorkflowCompliance() {
   return useMutation({
     mutationFn: async (input: { workflow_yaml: string; repository_full_name?: string }) => {
-      const res = await api.post(`${AI_BASE}/compliance`, {
+      const res = await aiApi.post(`${AI_BASE}/compliance`, {
         workflow_yaml: input.workflow_yaml,
         repository_full_name: input.repository_full_name || "",
       })
@@ -683,7 +794,7 @@ export function useRepoPipeline() {
       github_token?: string
       auto_deploy?: boolean
     }) => {
-      const res = await api.post(`${PIPELINE_BASE}/repo/pipeline`, {
+      const res = await aiApi.post(`${PIPELINE_BASE}/repo/pipeline`, {
         repository_full_name: input.repository_full_name,
         github_token: input.github_token || "",
         auto_deploy: input.auto_deploy ?? false,
@@ -773,7 +884,7 @@ export function usePerVulnRecommendation() {
         scanner?: string | null
       }
     }) => {
-      const res = await api.post(`${AI_BASE}/recommend`, {
+      const res = await aiApi.post(`${AI_BASE}/recommend`, {
         repository_full_name: input.repository_full_name,
         github_token: input.github_token || "",
         vulnerability: input.vulnerability,

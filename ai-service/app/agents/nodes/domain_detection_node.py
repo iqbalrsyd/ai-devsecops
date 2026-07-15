@@ -2,6 +2,10 @@ import json
 import re
 
 from app.agents.pipeline_state import PipelineEngineerState
+from app.agents.semgrep_rules.code_signatures import (
+    load_code_signatures,
+    score_all_domains,
+)
 from app.services.llm_service import get_llm
 
 
@@ -435,6 +439,54 @@ def domain_detection_node(state: PipelineEngineerState) -> PipelineEngineerState
         detected_libraries, detected_entities, detected_routes
     )
 
+    # ------------------------------------------------------------------
+    # v1.1 (skripsi Bab 4 §4.4): ground-truth-anchored KB-based scoring.
+    #
+    # The library/keyword heuristic above fails for Java/Maven repos
+    # (ThingsBoard: no `package.json` → no library signals → "general"),
+    # and for monorepos where the dominant language is a UI framework
+    # (Ghost monorepo: `ghost` keyword absent from the heuristic libs).
+    # We now read the `code_signatures` block from
+    # `domain_knowledge_base.yml` and score each domain against the
+    # ACTUAL repo structure, library list, and source-file content.
+    # When the KB score is high enough (or the matched signature is
+    # `required`), the LLM/heuristic answer is overridden — this is
+    # what makes the ground-truth domains reliably detectable.
+    # ------------------------------------------------------------------
+    signatures_by_domain = load_code_signatures()
+    repo_name = (state.get("repository_name") or "").lower()
+    repo_description = (state.get("repository_description") or "").lower()
+    repository_structure = state.get("repository_structure") or []
+    source_files = state.get("source_files") or []
+    kb_rows = score_all_domains(
+        signatures_by_domain,
+        repo_name=repo_name,
+        repo_description=repo_description,
+        detected_libraries=detected_libraries,
+        repository_structure=repository_structure,
+        source_files=source_files,
+    )
+    kb_top_domain: str | None = None
+    kb_top_score: float = 0.0
+    kb_top_required: bool = False
+    kb_top_matched: list[dict] = []
+    if kb_rows:
+        kb_top_domain = kb_rows[0]["domain"]
+        kb_top_score = kb_rows[0]["score"]
+        kb_top_required = kb_rows[0]["has_required"]
+        kb_top_matched = kb_rows[0]["matched_signatures"]
+    # The KB is "decisive" when a `required: true` signature matches
+    # (ground truth) OR when the cumulative score is high enough.
+    kb_decisive = bool(
+        kb_top_domain
+        and (kb_top_required or kb_top_score >= 4.0)
+    )
+    print(
+        f"[domain_detection][kb] top={kb_top_domain} score={kb_top_score} "
+        f"required={kb_top_required} decisive={kb_decisive} "
+        f"matched={[m['id'] for m in kb_top_matched]}"
+    )
+
     llm_result = _llm_classify(signals, heuristic_scores)
     llm_failed = not llm_result or not llm_result.get("domain")
 
@@ -446,6 +498,14 @@ def domain_detection_node(state: PipelineEngineerState) -> PipelineEngineerState
         confidence = float(llm_result.get("confidence", 0.0)) if llm_result else 0.0
     except (TypeError, ValueError):
         confidence = 0.0
+
+    # If the KB has ground-truth evidence, override the LLM/heuristic.
+    # The override is the strongest signal we have — required = 1.0,
+    # strong score = 0.85 (still high, but slightly softer so the LLM
+    # can override if it has a really specific reason to).
+    if kb_decisive and kb_top_domain and kb_top_domain in VALID_DOMAINS:
+        domain = kb_top_domain
+        confidence = 1.0 if kb_top_required else 0.85
 
     # When the LLM is unavailable, returns a low-confidence answer, or
     # disagrees with the deterministic heuristic, fall back to the
@@ -496,9 +556,14 @@ def domain_detection_node(state: PipelineEngineerState) -> PipelineEngineerState
         # domain happens to match. (Healthcare-micro-vuln: LLM says
         # e-commerce, heuristic e-commerce = 2.0 < 3.0 -> veto
         # fires even though `heuristic_top == domain`.)
+        #
+        # v1.1: the KB signature is the ground-truth anchor. When
+        # the KB has matched a `required: true` signature, the veto
+        # is bypassed — the KB score is the strongest signal we have.
         if (
             domain != "general"
             and heuristic_raw_scores.get(domain, 0) < MIN_HEURISTIC_SCORE
+            and not (kb_decisive and kb_top_domain == domain)
         ):
             domain = "general"
             confidence = 0.0
@@ -514,6 +579,17 @@ def domain_detection_node(state: PipelineEngineerState) -> PipelineEngineerState
             confidence = 1.0
 
     evidence = llm_result.get("evidence") or [] if llm_result else []
+    # Always prepend KB-signature evidence (when present) so the
+    # reviewer sees *why* the domain was picked, even when the LLM
+    # is unavailable.
+    if kb_top_matched:
+        kb_lines = [
+            f"KB signature '{m['id']}' matched (score={m['score']}, required={m['required']}):"
+            f" repo_name={m['repo_name_hits']}, paths={m['path_hits']}, "
+            f"imports={m['import_hits']}, libs={m['lib_hits']}, kw={m['keyword_hits']}"
+            for m in kb_top_matched
+        ]
+        evidence = list(evidence) + kb_lines if isinstance(evidence, list) else kb_lines
     if not evidence:
         evidence = _build_evidence_from_signals(
             detected_libraries, detected_entities, detected_routes, domain

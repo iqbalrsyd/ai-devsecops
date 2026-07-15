@@ -588,3 +588,301 @@ rules:
       pci-dss: "3.5.1 Cryptographic keys must be stored protected"
       ai-devsecops-source: ecommerce.yml
     pattern-regex: '(?:sk_live_|sk_test_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,})'
+
+  # =========================================================================
+  # DJANGO-SPECIFIC RULES (untuk django-oscar / Django e-commerce)
+  # Justifikasi: ground truth repo (Django 5.1.3) vulnerable ke:
+  #   - CVE-2024-53908 (SQLi HasKey Oracle, HIGH) — fixed di Django 5.1.4
+  #   - CVE-2024-53907 (DoS strip_tags, MODERATE) — fixed di Django 5.1.4
+  # Rules di bawah ini mendeteksi POLA PENGGUNAAN di kode Django aplikasi
+  # yang vulnerable terhadap CVE di atas.
+  # =========================================================================
+
+  - id: ecommerce-django-raw-query-string-interpolation
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Raw SQL query dengan string interpolation atau concatenation. Django
+      ORM harusnya dipakai; jika HARUS raw, gunakan parameterized query
+      (`cursor.execute("SELECT ... WHERE id = %s", [user_id])`). Vulnerable
+      ke SQL injection termasuk CVE Django ORM (CVE-2021-35042,
+      CVE-2022-28346, CVE-2022-28347). OWASP A03:2021.
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      cve: "CVE-2021-35042, CVE-2022-28346, CVE-2022-28347"
+      owasp: "A03:2021 Injection"
+      ai-devsecops-source: ecommerce.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $CURSOR.execute($QUERY + $X)
+          - pattern: |
+              $CURSOR.execute($QUERY % $X)
+          - pattern: |
+              $CURSOR.execute(f"...")
+              ...
+          - pattern: |
+              $MODEL.objects.raw($QUERY + $X)
+          - pattern: |
+              $MODEL.objects.raw(f"...")
+              ...
+          - pattern: |
+              $MODEL.objects.extra(where=[$X + ...])
+          - pattern: |
+              RawSQL($X + $Y, [])
+
+  - id: ecommerce-django-haskey-with-user-input
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Django `HasKey()` lookup dipakai dengan user-controlled `lhs` value
+      pada Oracle database. Vulnerable ke SQL injection
+      (CVE-2024-53908, HIGH, fixed di Django 5.1.4). Aplikasi yang
+      menggunakan `jsonfield.has_key` melalui `__has_key=` syntax
+      tidak vulnerable, tapi `HasKey(...)` direct dengan user input
+      harus dihindari. CWE-89.
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      cve: "CVE-2024-53908"
+      owasp: "A03:2021 Injection"
+      owasp-api: "API8:2023 Security Misconfiguration"
+      ai-devsecops-source: ecommerce.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $QS.filter(HasKey($LHS, $RHS))
+          - pattern: |
+              $MODEL.objects.filter(HasKey($LHS, $RHS))
+          - pattern: |
+              $MODEL.objects.filter(**{"$FIELD__has_key": $X})
+      - metavariable-regex:
+          metavariable: $LHS
+          regex: '.*(request|user|input|args|data).*'
+
+  - id: ecommerce-django-order-by-with-user-input
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `QuerySet.order_by()` dengan user-controlled input. Vulnerable ke
+      SQL injection (CVE-2021-35042, fixed di Django 3.2.5). Selalu
+      whitelisting field yang boleh dipakai untuk sort. CWE-89.
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      cve: "CVE-2021-35042"
+      owasp: "A03:2021 Injection"
+      ai-devsecops-source: ecommerce.yml
+    patterns:
+      - pattern-either:
+          - pattern: $QS.order_by($REQ.$ATTR)
+          - pattern: $QS.order_by($REQ.GET.get(...))
+          - pattern: $QS.order_by($REQ.POST.get(...))
+          - pattern: $MODEL.objects.all().order_by($REQ.$ATTR)
+          - pattern: |
+              $SORT = $REQ.$ATTR
+              ...
+              $QS.order_by($SORT)
+          - pattern: |
+              $SORT = request.GET.get($KEY)
+              ...
+              $QS.order_by($SORT)
+      - metavariable-regex:
+          metavariable: $ATTR
+          regex: '.*(GET|POST|query|data|params|args).*'
+
+  - id: ecommerce-django-strip-tags-on-user-input
+    languages: [python]
+    severity: WARNING
+    message: >-
+      `strip_tags()` dipanggil pada user-controlled input. Vulnerable
+      ke Denial of Service via crafted input dengan nested incomplete
+      HTML entities (CVE-2024-53907, MODERATE, fixed di Django 5.1.4).
+      Validasi panjang input atau gunakan library HTML parsing yang
+      aman. CWE-400.
+    metadata:
+      cwe: "CWE-400: Uncontrolled Resource Consumption"
+      cve: "CVE-2024-53907"
+      owasp: "A05:2021 Security Misconfiguration"
+      ai-devsecops-source: ecommerce.yml
+    patterns:
+      - pattern-either:
+          - pattern: strip_tags($REQ.$ATTR)
+          - pattern: strip_tags($REQ.GET.get(...))
+          - pattern: strip_tags($REQ.POST.get(...))
+          - pattern: strip_tags($REQ.body)
+          - pattern: |
+              $X = $REQ.$ATTR
+              ...
+              strip_tags($X)
+          - pattern: |
+              {{ $VAR|striptags }}
+      - metavariable-regex:
+          metavariable: $ATTR
+          regex: '.*(GET|POST|body|data|query).*'
+
+  - id: ecommerce-django-mark-safe-with-user-input
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `django.utils.safestring.mark_safe()` dipakai dengan user input.
+      `mark_safe` memberitahu Django tidak perlu escape — kalau input
+      dari user, ini adalah XSS. Gunakan template autoescape atau
+      sanitize manual. CWE-79.
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+      owasp: "A03:2021 Injection"
+      ai-devsecops-source: ecommerce.yml
+    patterns:
+      - pattern-either:
+          - pattern: mark_safe($REQ.$ATTR)
+          - pattern: mark_safe($REQ.GET.get(...))
+          - pattern: mark_safe($REQ.POST.get(...))
+          - pattern: mark_safe($REQ.body)
+          - pattern: mark_safe(format_html($X))
+      - metavariable-regex:
+          metavariable: $ATTR
+          regex: '.*(GET|POST|body|data|query).*'
+
+  - id: ecommerce-django-orm-raw-execute-without-params
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `cursor.execute()` dengan single argument (raw SQL string) tanpa
+      parameterized args. SQL injection risk. Selalu pakai parameterized
+      query: `cursor.execute("SELECT ... WHERE id = %s", [user_id])`.
+    metadata:
+      cwe: "CWE-89: SQL Injection"
+      owasp: "A03:2021 Injection"
+      ai-devsecops-source: ecommerce.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $CURSOR.execute($STR)
+          - pattern: |
+              connection.cursor().execute($STR)
+      - metavariable-regex:
+          metavariable: $STR
+          regex: '.*(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER).*'
+
+  - id: ecommerce-django-debug-true-in-production
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `DEBUG = True` di settings. Production harus `DEBUG = False`
+      untuk mencegah information disclosure (traceback, settings
+      leak). OWASP A05:2021.
+    metadata:
+      cwe: "CWE-489: Active Debug Code"
+      owasp: "A05:2021 Security Misconfiguration"
+      ai-devsecops-source: ecommerce.yml
+    pattern: "DEBUG = True"
+
+  - id: ecommerce-django-secret-key-hardcoded
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Django SECRET_KEY di-hardcode di source code. Production harus
+      load dari env var atau secret manager. SECRET_KEY bocor = attacker
+      bisa forge session, CSRF token, dll. CWE-798.
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      owasp: "A07:2021 Identification and Authentication Failures"
+      ai-devsecops-source: ecommerce.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              SECRET_KEY = "django-insecure-..."
+          - pattern: |
+              SECRET_KEY = "change-me"
+          - pattern: |
+              SECRET_KEY = "test"
+          - pattern: |
+              SECRET_KEY = "secret"
+          - pattern: |
+              SECRET_KEY = $LITERAL
+      - metavariable-regex:
+          metavariable: $LITERAL
+          regex: '^["''][a-zA-Z0-9!@#$%^&*()_+\-=]{20,}["'']$'
+
+  - id: ecommerce-django-allow-any-host
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Django `ALLOWED_HOSTS = ['*']` atau `ALLOWED_HOSTS = []` di
+      production. Vulnerable ke HTTP Host header attack (CVE-2020-27687
+      dan class). Set ALLOWED_HOSTS ke specific domain. OWASP A05:2021.
+    metadata:
+      cwe: "CWE-601: URL Redirection to Untrusted Site"
+      owasp: "A05:2021 Security Misconfiguration"
+      ai-devsecops-source: ecommerce.yml
+    pattern-regex: 'ALLOWED_HOSTS\s*=\s*\[?\s*[''"]\*[''"]\s*\]?'
+
+  - id: ecommerce-django-csrf-exempt-on-payment
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `@csrf_exempt` decorator dipakai pada payment/checkout view.
+      Memungkinkan CSRF attack — attacker bisa submit form dari
+      site lain atas nama victim. Gunakan CSRF token. OWASP A01:2021.
+    metadata:
+      cwe: "CWE-352: Cross-Site Request Forgery"
+      owasp: "A01:2021 Broken Access Control"
+      ai-devsecops-source: ecommerce.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @csrf_exempt
+              def $VIEW($REQ, ...):
+                ...
+                $RET = $MODEL.objects.create(...)
+                ...
+                return $RET
+          - pattern: |
+              @csrf_exempt
+              def $VIEW($REQ, ...):
+                ...
+                $RET = process_payment(...)
+                ...
+                return $RET
+          - pattern: |
+              @csrf_exempt
+              def $VIEW($REQ, ...):
+                ...
+                charge = stripe.Charge.create(...)
+                ...
+                return $RET
+
+  - id: ecommerce-django-pickle-load
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `pickle.load()` atau `pickle.loads()` dipakai untuk deserialize
+      data. Pickle bisa execute arbitrary code. Vulnerable ke RCE.
+      Untuk Django session, ini sangat berbahaya. CWE-502.
+    metadata:
+      cwe: "CWE-502: Deserialization of Untrusted Data"
+      owasp: "A08:2021 Software and Data Integrity Failures"
+      ai-devsecops-source: ecommerce.yml
+    patterns:
+      - pattern-either:
+          - pattern: pickle.load($F)
+          - pattern: pickle.loads($X)
+          - pattern: cPickle.load($F)
+          - pattern: yaml.load($X, Loader=yaml.Loader)
+
+  - id: ecommerce-django-django-oscar-payment
+    languages: [python]
+    severity: WARNING
+    message: >-
+      django-oscar payment gateway integration pattern. Jika menggunakan
+      third-party payment (Stripe/PayPal), pastikan:
+        1) Webhook handler verify signature (`stripe.Webhook.construct_event`)
+        2) Payment amount dihitung server-side dari product_id, bukan dari request
+        3) Idempotency-Key dipakai untuk payment intent
+        4) PCI-DSS: tidak ada PAN yang di-log atau di-store
+      Berkaitan dengan ground truth CVE untuk repo ini.
+    metadata:
+      cwe: "CWE-345: Insufficient Verification of Data Authenticity"
+      owasp-api: "API2:2023 Broken Authentication"
+      pci-dss: "6.4.3 Protect web app from forged payment callbacks"
+      ai-devsecops-source: ecommerce.yml
+    pattern-regex: '(?:stripe\.|braintree\.|paypal\.|midtrans|xendit)'

@@ -1789,7 +1789,7 @@ func (h *PipelineHandler) Generate(c *gin.Context) {
 	})
 	securityControlsJSON, _ := json.Marshal(aiResp.GeneratedStages)
 
-	deploymentResultsJSON := ""
+	deploymentResultsJSON := "{}"
 	if aiResp.GitHubPRURL != "" || aiResp.WorkflowFile != "" {
 		depMap := map[string]any{
 			"branch":        aiResp.GitHubBranch,

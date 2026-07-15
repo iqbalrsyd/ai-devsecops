@@ -252,6 +252,9 @@ def _build_pipeline_response(result: dict, repository_full_name: str) -> dict:
         "ai_generated_rules": result.get("ai_generated_rules", []) or [],
         "llm_generated_rules": result.get("llm_generated_rules", []) or [],
         "job_designs": result.get("job_designs", []) or [],
+        "cvss_driven_jobs": result.get("cvss_driven_jobs", []) or [],
+        "cvss_driven_jobs_reasoning": result.get("cvss_driven_jobs_reasoning", ""),
+        "cvss_driven_jobs_count": result.get("cvss_driven_jobs_count", 0),
         # === Pipeline output (already canonical names) ===
         "generated_workflow": result.get("generated_workflow", ""),
         "generated_workflow_generic": result.get("generated_workflow_generic", ""),

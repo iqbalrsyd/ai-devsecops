@@ -26,8 +26,8 @@ type Pipeline struct {
 	Stages                  string    `json:"stages" gorm:"type:jsonb;not null;default:'[]'"`
 	AIExplanation           string    `json:"ai_explanation" gorm:"type:text"`
 	GenerationParams        string    `json:"generation_params" gorm:"type:jsonb;not null;default:'{}'"`
-	ValidationResults       string    `json:"validation_results" gorm:"type:jsonb"`
-	DeploymentResults       string    `json:"deployment_results" gorm:"type:jsonb"`
+	ValidationResults       string    `json:"validation_results" gorm:"type:jsonb;default:'{}'"`
+	DeploymentResults       string    `json:"deployment_results" gorm:"type:jsonb;default:'{}'"`
 	SecurityControlsApplied string    `json:"security_controls_applied" gorm:"type:jsonb;not null;default:'[]'"`
 	ComplianceMetadata      string    `json:"compliance_metadata" gorm:"type:jsonb;not null;default:'{}'"`
 	// NodeIO captures the per-node I/O trace (input keys, output

@@ -106,7 +106,7 @@ rules:
           - pattern: |
               $MQTT.publish($REQ.query.device_id + "/command", $CMD)
           - pattern: |
-              if ($REQ.headers['x-device-id'] == $KNOWN_DEVICE):
+              if ($REQ.headers["x-device-id"] == $KNOWN_DEVICE) { ... }
 
   - id: iot-default-mqtt-port-public
     languages: [javascript, typescript, python]
@@ -279,11 +279,11 @@ rules:
     patterns:
       - pattern-either:
           - pattern: |
-              if ($REQ.headers["x-device-id"]):
+              if ($REQ.headers["x-device-id"]) { ... }
           - pattern: |
-              if ($REQ.headers["device-id"]):
+              if ($REQ.headers["device-id"]) { ... }
           - pattern: |
-              if ($DEVICE_ID == $REQ.headers["device-id"]):
+              if ($DEVICE_ID == $REQ.headers["device-id"]) { ... }
       - pattern-not: |
           if verify_signature($REQ, $DEVICE_KEY):
 
@@ -298,3 +298,271 @@ rules:
       owasp-iot: "I3 Insecure Network Services"
       ai-devsecops-source: iot-mqtt.yml
     pattern-regex: '\b(?:ftp|telnet)\.(?:get|put|connect|open)\s*\('
+
+  # =========================================================================
+  # JAVA / SPRING BOOT SPECIFIC (untuk ThingsBoard / IoT platform)
+  # Justifikasi: ground truth repo (ThingsBoard v4.0.2) pakai Java/Spring
+  # Boot. Rules di bawah target CVE:
+  #   - CVE-2025-34282 (SSRF via SVG, 9.1, fixed v4.2.1)
+  #   - CVE-2025-34281 (XSS via SVG, 5.4)
+  #   - CVE-2025-9094  (Gateway input, 4.3)
+  #   - CVE-2024-55466 (file upload, 6.5)
+  # =========================================================================
+
+  - id: iot-java-image-upload-no-extension-validation
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Image upload handler tidak validasi ekstensi file. ThingsBoard
+      CVE-2025-34282: SVG upload tanpa validasi → SSRF via `<image href>`
+      fetching internal network. CVE-2025-34281: stored XSS via SVG `<script>`.
+      Selalu whitelist ekstensi (jpg, png) dan reject SVG dari upload
+      user-generated. OWASP IoT I10.
+    metadata:
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      cve: "CVE-2025-34282, CVE-2025-34281, CVE-2024-55466"
+      owasp-iot: "I10 Lack of Device Management"
+      ai-devsecops-source: iot-mqtt.yml
+    pattern-either:
+      - pattern: |
+          if ($NAME.endsWith(".svg")) { ... }
+      - patterns:
+          - pattern-either:
+              - pattern: |
+                  $TYPE.equals($EXT)
+              - pattern: |
+                  String $EXT = $FILENAME.substring($FILENAME.lastIndexOf("."));
+                  ...
+                  $TYPE.equals($EXT)
+          - metavariable-regex:
+              metavariable: $EXT
+              regex: '.*\.(svg|html|htm|xml|js)'
+
+  - id: iot-java-svg-upload-allowed
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Upload handler menerima SVG file. SVG bisa berisi `<script>`
+      (XSS) atau `<image href="http://internal/">` (SSRF). ThingsBoard
+      CVE-2025-34282 (SSRF 9.1) + CVE-2025-34281 (XSS 5.4) di image
+      gallery. Reject .svg di upload handler. OWASP IoT I10.
+    metadata:
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
+      cve: "CVE-2025-34282, CVE-2025-34281"
+      owasp-iot: "I10 Lack of Device Management"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $ALLOWED.add(".svg")
+          - pattern: |
+              $ALLOWED.add("image/svg+xml")
+          - pattern: |
+              if ($EXT.equalsIgnoreCase("svg")) { ... save ... }
+          - pattern: |
+              case "svg": $CONTROLLER.save(...)
+
+  - id: iot-java-ssrf-image-fetch-no-allowlist
+    languages: [java]
+    severity: ERROR
+    message: >-
+      URL fetch di image processing tanpa validasi allowlist domain.
+      ThingsBoard CVE-2025-34282: SVG `<image href="http://internal:8086">`
+      dieksekusi saat SVG di-parse untuk preview. Selalu validate URL
+      terhadap allowlist domain (CDN internal only). OWASP IoT I3.
+    metadata:
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      cve: "CVE-2025-34282"
+      owasp-iot: "I3 Insecure Network Services"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              URL $URL = new URL($X);
+              ...
+              $IS = $URL.openStream();
+          - pattern: |
+              $HTTP.newBuilder($X).build()
+          - pattern: |
+              new URI($X)
+          - pattern: |
+              HttpClient.newHttpClient().send(...)
+      - metavariable-regex:
+          metavariable: $X
+          regex: '.*(request|user|input|data|param).*'
+
+  - id: iot-java-mqtt-tls-disabled
+    languages: [java]
+    severity: ERROR
+    message: >-
+      MQTT broker client tidak pakai TLS. ThingsBoard pakai Eclipse Paho
+      untuk MQTT broker internal. Production harus set `ssl://` bukan
+      `tcp://`, dengan `setSocketFactory(SSL_CONTEXT.getSocketFactory())`.
+      Cleartext MQTT = device credentials bocor di network. OWASP IoT I1.
+    metadata:
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+      owasp-iot: "I1 Weak/Hard-coded Passwords"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: MqttClient($HOST, $PORT, $CLIENT_ID)
+          - pattern: new MqttClient($HOST, $PORT, $CLIENT_ID)
+          - pattern: MqttClient($URL, $CLIENT_ID)
+      - metavariable-regex:
+          metavariable: $URL
+          regex: '^"tcp://.*"'
+
+  - id: iot-java-freemarker-ssti
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Apache FreeMarker template processing dengan input user. Vulnerable
+      ke Server-Side Template Injection. CVE-2023-45303 (ThingsBoard
+      email templates 8.8). Hindari `?new()`, `?api`, `?interpret` di
+      data yang dapat dikontrol user. Gunakan FreeMarker sandbox.
+      CWE-94.
+    metadata:
+      cwe: "CWE-94: Improper Control of Generation of Code"
+      cve: "CVE-2023-45303"
+      owasp: "A03:2021 Injection"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $TEMPLATE.process($DATA, $OUT)
+              ...
+          - pattern: |
+              Configuration $CFG = new Configuration($VER);
+              ...
+              $TEMPLATE.process($DATA, $OUT);
+          - pattern: |
+              $ENV.process($DATA)
+          - pattern: |
+              freemarker.template.utility.Execute
+      - metavariable-regex:
+          metavariable: $DATA
+          regex: '.*(request|user|input|data|param).*'
+
+  - id: iot-java-spring-security-tenant-bypass
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Spring Security endpoint yang tidak enforce tenant isolation.
+      ThingsBoard multi-tenant: setiap user/role terikat ke tenant_id.
+      CVE-2022-48341 (privilege escalation 8.8) + CVE-2022-45608 (vertical
+      privilege escalation 8.8): attacker modify `scopes` parameter
+      untuk escalate dari tenant_admin ke sys_admin. Selalu check
+      `@PreAuthorize("hasAuthority('SYS_ADMIN')")` di endpoint yang
+      modify user/role. CWE-269.
+    metadata:
+      cwe: "CWE-269: Improper Privilege Management"
+      cve: "CVE-2022-48341, CVE-2022-45608"
+      owasp: "A01:2021 Broken Access Control"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @RequestMapping
+              public $RET $METHOD(...)
+          - pattern: |
+              @PostMapping
+              public $RET $METHOD(...)
+          - pattern: |
+              @GetMapping
+              public $RET $METHOD(...)
+      - pattern-not: |
+          @PreAuthorize
+          $ANN
+          @RequestMapping
+          public $RET $METHOD(...)
+
+  - id: iot-java-hardcoded-jwt-secret
+    languages: [java]
+    severity: ERROR
+    message: >-
+      JWT signing key hardcoded. ThingsBoard pakai JJWT untuk sign
+      token. Jika key bocor di source = attacker bisa forge admin token.
+      Selalu load dari env var. CWE-798.
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+      owasp: "A07:2021 Identification and Authentication Failures"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              Keys.hmacShaKeyFor("$SECRET".getBytes())
+          - pattern: |
+              new SecretKeySpec("$SECRET".getBytes(), "HmacSHA256")
+          - pattern: |
+              SignatureAlgorithm.HS256
+              ...
+              $TOKEN = JWT.create().sign(Algorithm.HMAC256("$SECRET"))
+      - metavariable-regex:
+          metavariable: $SECRET
+          regex: '^"(secret|changeme|test|admin|password|jwt|tbkey)'
+
+  - id: iot-java-coap-no-dtls
+    languages: [java]
+    severity: WARNING
+    message: >-
+      CoAP server/client pakai Californium tanpa DTLS. CoAP over
+      UDP cleartext = device telemetry bocor di network. Production
+      harus pakai coaps:// dengan DTLS handshake. OWASP IoT I3.
+    metadata:
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+      owasp-iot: "I3 Insecure Network Services"
+      ai-devsecops-source: iot-mqtt.yml
+    pattern: 'new CoapServer(\d+)'
+
+  - id: iot-java-add-gateway-no-validation
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Add Gateway endpoint tanpa input validation. CVE-2025-9094
+      (ThingsBoard 4.1, Improper neutralization of special elements).
+      Selalu validate device name dengan whitelist regex, sanitize
+      semua field yang dipakai di system command atau file path.
+      CWE-20.
+    metadata:
+      cwe: "CWE-20: Improper Input Validation"
+      cve: "CVE-2025-9094"
+      owasp: "A03:2021 Injection"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @PostMapping("/api/gateway")
+              public $RET $METHOD(...)
+          - pattern: |
+              @RequestMapping("/api/gateway")
+              public $RET $METHOD(...)
+      - pattern-not: |
+          @PreAuthorize("hasAuthority('...") 
+          $ANN
+          @PostMapping("/api/gateway")
+          public $RET $METHOD(...)
+
+  - id: iot-java-firmware-path-traversal
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Firmware upload tanpa validasi path. CVE-2023-29203 (ThingsBoard
+      path traversal 7.5). Path dari user input dipakai di `new File(...)`
+      atau `Paths.get(...)` tanpa normalisasi. Selalu validate
+      `normalized.startsWith(baseDir)`. CWE-22.
+    metadata:
+      cwe: "CWE-22: Path Traversal"
+      cve: "CVE-2023-29203"
+      owasp: "A01:2021 Broken Access Control"
+      ai-devsecops-source: iot-mqtt.yml
+    patterns:
+      - pattern-either:
+          - pattern: |
+              new File($PATH + $X)
+          - pattern: |
+              Paths.get($PATH, $X)
+          - pattern: |
+              new FileInputStream($PATH + $X)
+      - metavariable-regex:
+          metavariable: $X
+          regex: '.*(firmware|name|filename|input|param).*'

@@ -17,6 +17,7 @@ from app.agents.nodes.workflow_repair_node import workflow_repair_node
 from app.agents.nodes.github_branch_creation_node import github_branch_creation_node
 from app.agents.nodes.pull_request_creation_node import pull_request_creation_node
 from app.agents.nodes.security_analyzer import security_analyzer_node
+from app.agents.nodes.cvss_driven_job_generation_node import cvss_driven_job_generation_node
 from app.agents.nodes.recommendation_gen import recommendation_gen_node
 from app.agents.nodes.response_formatter import response_formatter_node
 
@@ -42,8 +43,8 @@ def build_pipeline_graph() -> StateGraph:
     Stage 3 (5):  workflow_generation → workflow_validation →
                   workflow_repair (dormant) →
                   github_branch_creation → pull_request_creation
-    Stage 4 (3):  security_analysis → recommendation_generation →
-                  response_formatter
+    Stage 4 (4):  security_analysis → cvss_driven_job_generation →
+                  recommendation_generation → response_formatter
     """
     workflow = StateGraph(PipelineEngineerState)
 
@@ -66,6 +67,7 @@ def build_pipeline_graph() -> StateGraph:
     workflow.add_node("pull_request_creation", pull_request_creation_node)
 
     workflow.add_node("security_analysis", security_analyzer_node)
+    workflow.add_node("cvss_driven_job_generation", cvss_driven_job_generation_node)
     workflow.add_node("recommendation_generation", recommendation_gen_node)
     workflow.add_node("response_formatter", response_formatter_node)
 
@@ -93,7 +95,8 @@ def build_pipeline_graph() -> StateGraph:
     workflow.add_edge("github_branch_creation", "pull_request_creation")
 
     workflow.add_edge("pull_request_creation", "security_analysis")
-    workflow.add_edge("security_analysis", "recommendation_generation")
+    workflow.add_edge("security_analysis", "cvss_driven_job_generation")
+    workflow.add_edge("cvss_driven_job_generation", "recommendation_generation")
     workflow.add_edge("recommendation_generation", "response_formatter")
     workflow.add_edge("response_formatter", END)
 

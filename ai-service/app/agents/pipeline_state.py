@@ -57,6 +57,15 @@ class PipelineEngineerState(TypedDict):
     job_designs_reasoning: str | None
     job_designs_valid_count: int
 
+    # K2.4 (CVSS-driven jobs): additional 1-2 custom jobs generated
+    # post-security-analysis to CLOSE the gap between applicable
+    # coverages and the coverages served by standard + domain +
+    # job_reasoning designs. Each job is justified by top CVSS
+    # findings. Separate field so K2.4 metric is traceable.
+    cvss_driven_jobs: list
+    cvss_driven_jobs_reasoning: str | None
+    cvss_driven_jobs_count: int
+
     # Tahap 3 (Tambah v9)
     custom_semgrep_rules_yaml: str | None
     custom_semgrep_rules_path: str | None
