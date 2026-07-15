@@ -6,6 +6,7 @@ import yaml
 
 from app.agents.nodes.workflow_generator import (
     _build_execution_results,
+    _build_threat_summary_job,
     _build_workflow_yaml,
     _filter_stages_by_evidence,
     _has_build_script,
@@ -1542,6 +1543,63 @@ jobs:
     assert "auth-go-credential-exposure" not in generic_yaml
     kinds = {f["kind"] for f in file_meta}
     assert kinds == {"generic", "custom"}, f"Expected 2 files (generic+custom), got {kinds}"
+
+
+def test_synthetic_threat_summary_emitted_for_general_domain():
+    """K2.4 split guarantee: for a `general` domain repo (where no
+    AI job_designs and no CVSS-driven jobs exist), the generator
+    MUST still emit a synthetic `<domain>-threat-summary` job so the
+    2-file split (generic + custom) survives. The FE PipelineGenerator
+    relies on this to render two tabs.
+    """
+    state = _minimal_state()
+    state["detected_domain"] = "general"
+    state["domain_confidence"] = 0.4
+    state["general_only"] = True
+    # No cvss_driven_jobs, no job_designs.
+
+    yaml_text, stages, explanations = _build_workflow_yaml(
+        primary_language="go",
+        package_manager="go mod",
+        test_framework="go test",
+        frameworks=[],
+        build_tools=["go"],
+        stages=["lint", "test", "sast", "secret-scan", "dependency-scan"],
+        arch_type="monolithic",
+        findings=[],
+        state=state,
+    )
+
+    assert "general-threat-summary" in stages, (
+        f"Synthesised threat summary must be emitted for general domain. "
+        f"Got stages: {stages}"
+    )
+    synth = [e for e in explanations if e.get("name") == "general-threat-summary"]
+    assert synth and synth[0].get("status") == "domain_summary"
+
+
+def test_synthetic_threat_summary_body_is_valid_yaml():
+    """Regression: the synthesised job body must round-trip through
+    yaml.safe_load when embedded in the merged workflow. Earlier
+    versions had unescaped double quotes inside the `run: |` block
+    that broke the parser.
+    """
+    body = _build_threat_summary_job(
+        job_name="general-threat-summary",
+        domain="general",
+        primary_language="go",
+        threats=[],
+        state=None,
+    )
+    assert body, "synthetic body must be non-empty"
+    # Embed into a minimal valid workflow doc and ensure the result
+    # parses back to a dict with the job name as a key.
+    merged = f"name: CI\njobs:\n  general-threat-summary:\n{body}\n"
+    parsed = yaml.safe_load(merged)
+    assert isinstance(parsed, dict)
+    assert "general-threat-summary" in parsed["jobs"]
+    job = parsed["jobs"]["general-threat-summary"]
+    assert "steps" in job and len(job["steps"]) >= 1
 
 
 if __name__ == "__main__":

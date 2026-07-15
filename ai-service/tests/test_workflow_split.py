@@ -200,22 +200,34 @@ def test_build_workflow_yaml_split_runs_end_to_end():
     gen_doc = yaml.safe_load(result["generic_yaml"])
     assert isinstance(gen_doc, dict)
     assert "jobs" in gen_doc
-    # Custom file is empty in this smoke test (no AI job_designs
-    # supplied and no domain-specific static templates in the new
-    # 3-domain scope). Empty string is the expected contract.
-    assert result["custom_yaml"] == ""
+    # K2.4 split guarantee: even without AI job_designs in state, the
+    # e-commerce domain synthesises a threat-summary job so the custom
+    # file is non-empty. The FE PipelineGenerator then shows two tabs.
+    assert result["custom_yaml"] != "", (
+        "custom file must be non-empty for a concrete domain (e-commerce) "
+        "even when no AI job_designs are supplied"
+    )
 
     # Stage classification: the standard 4 jobs land in the generic file
-    # and no custom jobs are present in this smoke test (no job_designs).
+    # and the synthetic compliance summary lands in the custom file.
     assert "lint" in result["stages_general"]
     assert "sast" in result["stages_general"]
-    # Without AI job_designs in state, the custom file is empty.
-    assert result["stages_custom"] == []
+    assert len(result["stages_custom"]) >= 1, (
+        "custom stages must contain at least the synthesised threat-summary job"
+    )
+    assert any(
+        "threat-summary" in s for s in result["stages_custom"]
+    ), f"expected a threat-summary stage, got {result['stages_custom']}"
 
 
-def test_build_workflow_yaml_split_general_domain_has_no_custom():
-    """A `general` domain must NOT produce a custom file (no domain jobs
-    are needed, so the custom file is empty / dropped)."""
+def test_build_workflow_yaml_split_general_domain_has_synthetic_custom():
+    """K2.4 split guarantee: even for a `general` domain (where there
+    are no AI job_designs and no domain-specific templates), the
+    generator MUST still produce a non-empty custom file so the FE
+    renders the two-file split. Without this, the user only sees one
+    tab and the `domain-compliance` job that wires the custom file in
+    is never emitted.
+    """
     result = build_workflow_yaml_split(
         primary_language="Python",
         package_manager="pip",
@@ -230,9 +242,14 @@ def test_build_workflow_yaml_split_general_domain_has_no_custom():
         detected_domain="general",
         state=None,
     )
-    assert result["custom_yaml"] == "", "general domain must not emit a custom file"
-    assert all(m["kind"] == "generic" for m in result["file_meta"])
-    assert result["stages_custom"] == []
+    assert result["custom_yaml"] != "", (
+        "custom file must be non-empty even for general domain "
+        "(K2.4 split guarantee — synthetic compliance summary job)"
+    )
+    kinds = {m["kind"] for m in result["file_meta"]}
+    assert kinds == {"generic", "custom"}, (
+        f"both files must be present in file_meta, got {kinds}"
+    )
 
 
 def test_generic_and_custom_stage_names_disjoint():
