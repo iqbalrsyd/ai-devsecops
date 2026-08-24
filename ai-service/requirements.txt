@@ -14,4 +14,4 @@ python-dotenv
 httpx
 pyjwt
 # PDF report generator
-reportlab>=5.0.0
+reportlab>=5.0.1
